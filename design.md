@@ -10,6 +10,7 @@ Reference intake: `ref/pi-memory` (jayzeng/pi-memory). This document defines **o
 | `memory_read` + `memory_search` | **Keep both** — open known path vs discover unknown facts |
 | Scratchpad | **Drop** — fewer scopes; daily + MEMORY are enough |
 | Context injection | **Hybrid**: stable system-prompt core + turn-scoped retrieval message (not ref’s per-turn system rebuild) |
+| Tags & links | **In scope** as content conventions (`#tag`, `[[wiki-link]]`) — no schema/registry; covered by search + e2e/eval |
 
 ## What ref gets wrong for us
 
@@ -125,6 +126,26 @@ Fallback if qmd missing: core-only injection; tools still work.
 
 - `memory_status`: project root, memory dir, inventory, qmd + collection + embeddings, config.
 
+### Job 7 — Tags and links (content conventions)
+
+Same model as ref: **not a tag system in code** — conventions in the markdown that make BM25 / keyword retrieval sharper.
+
+```markdown
+#decision [[database-choice]] Chose PostgreSQL for all backend services.
+#preference [[package-manager]] Always use pnpm in this repo, never npm.
+#lesson [[api-versioning]] URL prefix versioning (/v1/) avoids CDN cache issues.
+```
+
+| In scope | Out of scope |
+|----------|--------------|
+| `#tag` + `[[wiki-link]]` written into entry text | Tag ontology / enforced enum |
+| `memory_write` tool description nudges the agent to use them | Separate tag index, graph, or extractor |
+| `memory_search` keyword mode + hybrid turn retrieval find `#decision` / `database-choice` via qmd FTS | Auto-tagging prose without the marker |
+
+If the user never tags, everything still works — body text remains searchable. Tags are an optional recall amplifier, not a required schema.
+
+**Suggested vocabulary** (guidance only, not validated): `#decision`, `#preference`, `#lesson`, `#bug`, `#fact`.
+
 ## Explicitly out / deferred
 
 | Item | Status |
@@ -132,10 +153,10 @@ Fallback if qmd missing: core-only injection; tools still work.
 | Scratchpad | **Cut** |
 | Ref `per-turn` system rebuild | **Rejected** (replaced by hybrid) |
 | Yesterday daily in always-on | **Cut** (use search / read) |
+| Tag registry / knowledge graph | **Won’t build** (conventions + FTS only) |
 | Exit-summary LLM on quit | Deferred |
 | Compact handoff | Deferred |
 | Global + project dual layer | Deferred |
-| Knowledge graph | Won’t build |
 
 ## Config (target)
 
@@ -155,8 +176,83 @@ Fallback if qmd missing: core-only injection; tools still work.
 4. System memory core is byte-stable across turns; retrieval arrives as a turn message.
 5. Without qmd: write/read/forget/restore/core-inject/status still work.
 6. With qmd: search + turn retrieval only hit this project’s store.
+7. `#tags` / `[[links]]` in stored entries are findable via keyword search and turn retrieval (proven in e2e/eval).
+
+## Testing & eval
+
+Three levels, same idea as ref — adapted to project scope, no scratchpad, hybrid injection.
+
+### Level 1 — Unit (deterministic, no LLM / no qmd)
+
+`npm test` → `test/unit.test.ts`
+
+| Area | Cases |
+|------|--------|
+| Project binding | Git-root walk; `.pi/memory` default; distinct `pi-mem-…` collection names; never `~/.pi/agent/memory` |
+| Store helpers | Stamped write/forget/restore; daily date paths |
+| Context builder | Core = today + MEMORY only; empty store → empty; caps/truncation; **no scratchpad section** |
+| Retrieval helper | Sanitize prompt (≤200, strip controls); format top-N snippets; empty/timeout → `""` |
+
+Tags at this level: no special parser — unit tests may assert that content containing `#decision [[x]]` survives round-trip write helpers unchanged.
+
+### Level 2 — E2E (real `pi` + API key; qmd optional)
+
+`npm run test:e2e` → `test/e2e.ts`
+
+**Always run (no qmd):**
+
+1. Extension registers tools (no `scratchpad`)
+2. `memory_write` / `memory_read` round-trip under `<project>/.pi/memory/`
+3. Core injection: LLM answers from injected MEMORY / today daily
+4. Forget → recovery ID → restore
+5. `memory_search` graceful message when qmd missing
+6. `memory_status` reports project root + memory dir + collection name
+
+**qmd-dependent (skip if unavailable):**
+
+7. `memory_search` returns hits for a known fact in this project’s collection only
+8. Hybrid turn retrieval: related prompt surfaces memory **without** instructing the agent to search (turn message path)
+9. **`#tags` and `[[links]]`**: write `#decision [[database-choice]] Chose PostgreSQL…`, `qmd update`, then keyword search for `#decision` and for `database-choice` both hit
+10. Cross-project isolation: second temp project’s collection does not return first project’s entries
+
+### Level 3 — Recall eval (real `pi` + API key + qmd)
+
+`npm run test:eval` → `test/eval-recall.ts`
+
+Seed MEMORY / daily with tagged entries (ref-style corpus: `#decision [[…]] …`). Ask questions that require facts **not** sitting in the truncated core dump (buried / older / keyword-only via tag).
+
+Compare:
+
+| Mode | Setup | What we measure |
+|------|--------|-----------------|
+| A — hybrid on | `PI_MEMORY_RETRIEVE=on` (default) | Hit rate from turn-message retrieval alone (prefer no tool call) |
+| B — hybrid off | `PI_MEMORY_RETRIEVE=off` | Hit rate with core-only + tools if the model searches |
+
+**Tag-focused eval cases (required):**
+
+- Query by tag token (`#decision`, `#preference`) finds the right class of entries
+- Query by wiki-link slug (`database-choice`, `auth-strategy`) finds the linked fact
+- Natural-language question (“what database did we choose?”) still recalls the `#decision [[database-choice]]` entry via hybrid retrieval
+
+Score: keyword/entity presence in the assistant answer (same approach as ref). Report with-vs-without retrieval delta; optional multi-run (`EVAL_RUNS`).
+
+### CI expectations
+
+| Level | CI | Notes |
+|-------|-----|--------|
+| Unit | Always | Fast gate |
+| E2E core | Optional / nightly | Needs API key |
+| E2E qmd + tags | Optional | Needs `qmd` on PATH |
+| Eval | Manual / scheduled | Costly; pin cheap model via env |
 
 ## Implementation status
 
-- Scaffold exists (`index.ts`) with project binding, CRUD, stable inject, qmd — still includes scratchpad and lacks hybrid turn-message retrieval.
-- **Next implement step (not done yet):** drop scratchpad; switch Job 4 to hybrid per this doc.
+**PoC shipped in `index.ts`:**
+
+- Project binding + per-project qmd collection
+- CRUD tools (no scratchpad)
+- Hybrid injection: stable system core + turn-message retrieval (`PI_MEMORY_RETRIEVE`)
+- Tag/link guidance on `memory_write` + system prompt
+- Unit tests for binding, forget, sanitize, retrieve flag, core context
+
+**Still to build:** Level 2 e2e (esp. tags case 9 + cross-project) and Level 3 recall eval.

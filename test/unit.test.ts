@@ -6,15 +6,15 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
 	_getBinding,
+	_setPaths,
 	bindProject,
+	buildMemoryContext,
 	collectionNameForProject,
 	forgetBlocks,
-	parseScratchpad,
+	isRetrieveEnabled,
 	resolveMemoryDir,
 	resolveProjectRoot,
-	scratchpadAdd,
-	scratchpadToggle,
-	_setPaths,
+	sanitizeSearchPrompt,
 } from "../index.ts";
 
 describe("project binding", () => {
@@ -84,14 +84,15 @@ describe("store helpers", () => {
 		assert.ok(!next.includes("pnpm"));
 	});
 
-	it("scratchpad add/toggle", () => {
-		let c = scratchpadAdd("", "fix auth", "<!-- 2026-01-01 10:00:00 [abcd] -->");
-		assert.ok(c.includes("- [ ] fix auth"));
-		const toggled = scratchpadToggle(c, "auth", true);
-		assert.equal(toggled.matched, true);
-		assert.ok(toggled.content.includes("- [x] fix auth"));
-		const items = parseScratchpad(toggled.content);
-		assert.equal(items.filter((i) => i.done).length, 1);
+	it("tagged entries survive forget of unrelated match", () => {
+		const content = [
+			"<!-- 2026-01-01 10:00:00 [abcd1234] -->",
+			"#decision [[database-choice]] Chose PostgreSQL",
+			"",
+		].join("\n");
+		const { content: next, removed } = forgetBlocks(content, "mysql");
+		assert.equal(removed.length, 0);
+		assert.ok(next.includes("#decision [[database-choice]]"));
 	});
 
 	it("_setPaths for tests", () => {
@@ -99,5 +100,38 @@ describe("store helpers", () => {
 		const b = _getBinding();
 		assert.equal(b.projectRoot, path.resolve("/tmp/x-project"));
 		assert.equal(b.memoryDir, path.resolve("/tmp/x-mem"));
+	});
+});
+
+describe("injection helpers", () => {
+	it("sanitizeSearchPrompt strips controls and caps length", () => {
+		assert.equal(sanitizeSearchPrompt("  hello\x00world  "), "hello world");
+		assert.equal(sanitizeSearchPrompt("x".repeat(300)).length, 200);
+	});
+
+	it("isRetrieveEnabled defaults on", () => {
+		const prev = process.env.PI_MEMORY_RETRIEVE;
+		delete process.env.PI_MEMORY_RETRIEVE;
+		try {
+			assert.equal(isRetrieveEnabled(), true);
+			process.env.PI_MEMORY_RETRIEVE = "off";
+			assert.equal(isRetrieveEnabled(), false);
+		} finally {
+			if (prev === undefined) delete process.env.PI_MEMORY_RETRIEVE;
+			else process.env.PI_MEMORY_RETRIEVE = prev;
+		}
+	});
+
+	it("buildMemoryContext uses today + MEMORY only (no scratchpad)", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-ctx-"));
+		const mem = path.join(root, ".pi", "memory");
+		fs.mkdirSync(path.join(mem, "daily"), { recursive: true });
+		_setPaths(root, mem);
+		fs.writeFileSync(path.join(mem, "MEMORY.md"), "#decision [[x]] fact one\n", "utf-8");
+		const ctx = buildMemoryContext();
+		assert.ok(ctx.includes("MEMORY.md"));
+		assert.ok(ctx.includes("fact one"));
+		assert.ok(!ctx.toLowerCase().includes("scratchpad"));
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 });

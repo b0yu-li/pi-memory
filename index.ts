@@ -1,10 +1,9 @@
 /**
- * Project-scoped memory extension for pi.
- *
- * Storage: <projectRoot>/.pi/memory/ (not ~/.pi/agent/memory)
- * Search:  one qmd collection per project root
- *
- * See design.md for job boundaries vs ref/pi-memory.
+ * PoC: project-scoped memory for pi.
+ * Storage: <projectRoot>/.pi/memory/
+ * Injection: stable system core (today + MEMORY) + turn-message qmd retrieval
+ * No scratchpad. Tags/links are content conventions (#tag, [[wiki-link]]).
+ * See design.md.
  */
 
 import { type ExecFileOptions, execFile } from "node:child_process";
@@ -58,20 +57,17 @@ let PROJECT_ROOT = resolveProjectRoot(process.cwd());
 let MEMORY_DIR = resolveMemoryDir(PROJECT_ROOT);
 let COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 let MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
-let SCRATCHPAD_FILE = path.join(MEMORY_DIR, "SCRATCHPAD.md");
 let DAILY_DIR = path.join(MEMORY_DIR, "daily");
 let RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
 
-export function bindProject(cwd: string, env: MemoryEnv = process.env): {
-	projectRoot: string;
-	memoryDir: string;
-	collectionName: string;
-} {
+export function bindProject(
+	cwd: string,
+	env: MemoryEnv = process.env,
+): { projectRoot: string; memoryDir: string; collectionName: string } {
 	PROJECT_ROOT = resolveProjectRoot(cwd, env);
 	MEMORY_DIR = resolveMemoryDir(PROJECT_ROOT, env);
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
-	SCRATCHPAD_FILE = path.join(MEMORY_DIR, "SCRATCHPAD.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
 	RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
 	return { projectRoot: PROJECT_ROOT, memoryDir: MEMORY_DIR, collectionName: COLLECTION_NAME };
@@ -83,7 +79,6 @@ export function _setPaths(projectRoot: string, memoryDir?: string) {
 	MEMORY_DIR = memoryDir ? path.resolve(memoryDir) : path.join(PROJECT_ROOT, ".pi", "memory");
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
-	SCRATCHPAD_FILE = path.join(MEMORY_DIR, "SCRATCHPAD.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
 	RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
 }
@@ -94,7 +89,6 @@ export function _getBinding() {
 		memoryDir: MEMORY_DIR,
 		collectionName: COLLECTION_NAME,
 		memoryFile: MEMORY_FILE,
-		scratchpadFile: SCRATCHPAD_FILE,
 		dailyDir: DAILY_DIR,
 		recoveryDir: RECOVERY_DIR,
 	};
@@ -157,11 +151,10 @@ const RESPONSE_PREVIEW_MAX_CHARS = 4_000;
 const RESPONSE_PREVIEW_MAX_LINES = 120;
 const CONTEXT_LONG_TERM_MAX_CHARS = 4_000;
 const CONTEXT_LONG_TERM_MAX_LINES = 150;
-const CONTEXT_SCRATCHPAD_MAX_CHARS = 2_000;
-const CONTEXT_SCRATCHPAD_MAX_LINES = 120;
 const CONTEXT_DAILY_MAX_CHARS = 3_000;
 const CONTEXT_DAILY_MAX_LINES = 120;
-const CONTEXT_MAX_CHARS = 16_000;
+const CONTEXT_MAX_CHARS = 8_000;
+const CONTEXT_SEARCH_MAX_CHARS = 2_500;
 
 type TruncateMode = "start" | "end" | "middle";
 
@@ -268,17 +261,9 @@ function formatContextSection(
 }
 
 // ---------------------------------------------------------------------------
-// Job 2/3 — Scratchpad + forget/restore helpers
+// Job 2/3 — Forget/restore helpers
 // ---------------------------------------------------------------------------
 
-export interface ScratchpadItem {
-	done: boolean;
-	text: string;
-	meta: string;
-}
-
-const SCRATCHPAD_ITEM_REGEX = /^- \[([ xX])\] (.+)$/;
-const SCRATCHPAD_META_COMMENT_REGEX = /^<!-- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[[^\]\r\n]+\] -->$/;
 const MEMORY_ENTRY_META_COMMENT_REGEX =
 	/^<!-- (?:(?:last updated: )?\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|HANDOFF \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]\r\n]+\] -->$/;
 const RECOVERY_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -293,68 +278,6 @@ interface RecoveryRecord {
 	date?: string;
 	removedContent: string[];
 	restoredAt?: string;
-}
-
-export function parseScratchpad(content: string): ScratchpadItem[] {
-	const items: ScratchpadItem[] = [];
-	const lines = content.split("\n");
-	for (let i = 0; i < lines.length; i++) {
-		const match = lines[i].match(/^- \[([ xX])\] (.+)$/);
-		if (match) {
-			let meta = "";
-			if (i > 0 && lines[i - 1].match(/^<!--.*-->$/)) meta = lines[i - 1];
-			items.push({ done: match[1].toLowerCase() === "x", text: match[2], meta });
-		}
-	}
-	return items;
-}
-
-export function serializeScratchpad(items: ScratchpadItem[]): string {
-	const lines: string[] = ["# Scratchpad", ""];
-	for (const item of items) {
-		if (item.meta) lines.push(item.meta);
-		lines.push(`- [${item.done ? "x" : " "}] ${item.text}`);
-	}
-	return `${lines.join("\n")}\n`;
-}
-
-export function scratchpadAdd(content: string, text: string, meta: string): string {
-	if (!content.trim()) return serializeScratchpad([{ done: false, text, meta }]);
-	return `${content.replace(/\n+$/, "")}\n${meta}\n- [ ] ${text}\n`;
-}
-
-export function scratchpadToggle(
-	content: string,
-	needle: string,
-	done: boolean,
-): { content: string; matched: boolean } {
-	const lines = content.split("\n");
-	const lower = needle.toLowerCase();
-	for (let i = 0; i < lines.length; i++) {
-		const m = lines[i].match(SCRATCHPAD_ITEM_REGEX);
-		if (!m) continue;
-		if ((m[1].toLowerCase() === "x") === done) continue;
-		if (!m[2].toLowerCase().includes(lower)) continue;
-		lines[i] = `- [${done ? "x" : " "}] ${m[2]}`;
-		return { content: lines.join("\n"), matched: true };
-	}
-	return { content, matched: false };
-}
-
-export function scratchpadClearDone(content: string): { content: string; removed: number } {
-	const lines = content.split("\n");
-	const out: string[] = [];
-	let removed = 0;
-	for (const line of lines) {
-		const m = line.match(SCRATCHPAD_ITEM_REGEX);
-		if (m && m[1].toLowerCase() === "x") {
-			removed++;
-			if (out.length > 0 && SCRATCHPAD_META_COMMENT_REGEX.test(out[out.length - 1])) out.pop();
-			continue;
-		}
-		out.push(line);
-	}
-	return { content: out.join("\n"), removed };
 }
 
 export function forgetBlocks(content: string, match: string): { content: string; removed: string[] } {
@@ -456,30 +379,14 @@ function readRecoveryRecord(recoveryId: string): { record: RecoveryRecord; fileP
 }
 
 // ---------------------------------------------------------------------------
-// Job 4 — Context injection
+// Job 4 — Context injection (hybrid: stable core + turn retrieval)
 // ---------------------------------------------------------------------------
 
+/** Always-on core: today daily + MEMORY.md (no yesterday, no scratchpad). */
 export function buildMemoryContext(): string {
 	ensureDirs();
 	const sections: string[] = [];
-
-	const scratchpad = readFileSafe(SCRATCHPAD_FILE);
-	if (scratchpad?.trim()) {
-		const openItems = parseScratchpad(scratchpad).filter((i) => !i.done);
-		if (openItems.length > 0) {
-			const section = formatContextSection(
-				"## SCRATCHPAD.md (working context)",
-				serializeScratchpad(openItems),
-				"start",
-				CONTEXT_SCRATCHPAD_MAX_LINES,
-				CONTEXT_SCRATCHPAD_MAX_CHARS,
-			);
-			if (section) sections.push(section);
-		}
-	}
-
 	const today = todayStr();
-	const yesterday = yesterdayStr();
 
 	const todayContent = readFileSafe(dailyPath(today));
 	if (todayContent?.trim()) {
@@ -501,18 +408,6 @@ export function buildMemoryContext(): string {
 			"middle",
 			CONTEXT_LONG_TERM_MAX_LINES,
 			CONTEXT_LONG_TERM_MAX_CHARS,
-		);
-		if (section) sections.push(section);
-	}
-
-	const yesterdayContent = readFileSafe(dailyPath(yesterday));
-	if (yesterdayContent?.trim()) {
-		const section = formatContextSection(
-			`## Daily log: ${yesterday} (yesterday)`,
-			yesterdayContent,
-			"end",
-			CONTEXT_DAILY_MAX_LINES,
-			CONTEXT_DAILY_MAX_CHARS,
 		);
 		if (section) sections.push(section);
 	}
@@ -541,6 +436,19 @@ function getSnapshotMode(): SnapshotMode {
 	return v === "refresh" ? "refresh" : "stable";
 }
 
+/** Turn-message qmd retrieval (default on). Set PI_MEMORY_RETRIEVE=off to disable. */
+export function isRetrieveEnabled(): boolean {
+	const v = (process.env.PI_MEMORY_RETRIEVE ?? "on").trim().toLowerCase();
+	return !(v === "0" || v === "off" || v === "false" || v === "no");
+}
+
+export function sanitizeSearchPrompt(prompt: string): string {
+	return prompt
+		.replace(/[\x00-\x1f\x7f]/g, " ")
+		.trim()
+		.slice(0, 200);
+}
+
 let memorySnapshot: string | null = null;
 let snapshotDirty = false;
 let snapshotTakenOnDate: string | null = null;
@@ -551,6 +459,32 @@ function refreshMemorySnapshot(reason: string) {
 	snapshotDirty = false;
 	snapshotTakenOnDate = todayStr();
 	snapshotReason = reason;
+}
+
+function buildStableSystemAppend(): string {
+	const mode = getSnapshotMode();
+	const memoryContext = memorySnapshot ?? "";
+	if (!memoryContext) return "";
+
+	const caveat =
+		mode === "refresh"
+			? `Snapshot ${snapshotReason}. Use memory_read / memory_search for latest state.`
+			: "Core loaded once at session start (byte-stable). Use memory_read / memory_search for authoritative latest state.";
+
+	return [
+		"\n\n## Memory",
+		`(${caveat})`,
+		`Project root: ${PROJECT_ROOT}`,
+		`Store: ${MEMORY_DIR}`,
+		"Use memory_write to persist important information.",
+		"- Decisions / preferences / durable facts → MEMORY.md",
+		"- Day-to-day notes → daily/<YYYY-MM-DD>.md",
+		"- Search past context → memory_search (keyword | semantic | deep)",
+		"- Use #tags (e.g. #decision, #preference, #lesson, #bug, #fact) and [[wiki-links]] (e.g. [[database-choice]]) in content to improve search recall.",
+		'- If someone says "remember this," write it immediately.',
+		"",
+		memoryContext,
+	].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +768,52 @@ export function runQmdSearch(
 	});
 }
 
+/** Keyword top-N for the current user prompt → turn-message body (soft-fail). */
+export async function searchRelevantMemories(prompt: string): Promise<string> {
+	if (!qmdAvailable || !prompt.trim()) return "";
+	const sanitized = sanitizeSearchPrompt(prompt);
+	if (!sanitized) return "";
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const hasCollection = await checkCollection(COLLECTION_NAME);
+		if (!hasCollection) return "";
+
+		const results = await Promise.race([
+			runQmdSearch("keyword", sanitized, 3, 3_000),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error("timeout")), 3_000);
+			}),
+		]);
+
+		if (!results || results.results.length === 0) return "";
+
+		const snippets = results.results
+			.map((r) => {
+				const text = getQmdResultText(r);
+				if (!text.trim()) return null;
+				const filePath = getQmdResultPath(r);
+				const clipped =
+					text.length > CONTEXT_SEARCH_MAX_CHARS
+						? `${text.slice(0, CONTEXT_SEARCH_MAX_CHARS)}\n…`
+						: text.trim();
+				return filePath ? `_${filePath}_\n${clipped}` : clipped;
+			})
+			.filter(Boolean);
+
+		if (snippets.length === 0) return "";
+		return [
+			"## Relevant memories (auto-retrieved)",
+			"Prompt-relevant entries from this project's memory store. Prefer these over guessing.",
+			"",
+			snippets.join("\n\n---\n\n"),
+		].join("\n");
+	} catch {
+		return "";
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 type ToolOut = {
 	content: Array<{ type: "text"; text: string }>;
@@ -841,7 +821,6 @@ type ToolOut = {
 	isError?: true;
 };
 
-/** Unify tool result shapes so registerTool inference stays happy. */
 function toolResult(text: string, details: Record<string, unknown> = {}, isError = false): ToolOut {
 	return {
 		content: [{ type: "text" as const, text }],
@@ -872,8 +851,6 @@ export async function probeEmbeddings(): Promise<"ready" | "missing" | "unknown"
 
 export function getMemoryInventory() {
 	const longTerm = readFileSafe(MEMORY_FILE) ?? "";
-	const scratchpad = readFileSafe(SCRATCHPAD_FILE) ?? "";
-	const items = parseScratchpad(scratchpad);
 	let dailyFiles: string[] = [];
 	try {
 		dailyFiles = fs
@@ -888,8 +865,6 @@ export function getMemoryInventory() {
 		dir: MEMORY_DIR,
 		collectionName: COLLECTION_NAME,
 		longTermChars: longTerm.trim().length,
-		scratchpadOpen: items.filter((i) => !i.done).length,
-		scratchpadTotal: items.length,
 		dailyCount: dailyFiles.length,
 		latestDaily: dailyFiles.length ? dailyFiles[dailyFiles.length - 1].replace(/\.md$/, "") : null,
 	};
@@ -920,6 +895,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
+		// Skip non-user runs (e.g. custom triggerTurn) so we don't repeat retrieval.
+		if ("messageType" in event && event.messageType !== "user") {
+			const core = buildStableSystemAppend();
+			return core ? { systemPrompt: event.systemPrompt + core } : undefined;
+		}
+
 		const mode = getSnapshotMode();
 		if (mode === "refresh") {
 			const today = todayStr();
@@ -930,47 +911,48 @@ export default function (pi: ExtensionAPI) {
 			refreshMemorySnapshot("before_agent_start");
 		}
 
-		const memoryContext = memorySnapshot ?? "";
-		if (!memoryContext) return;
+		const coreAppend = buildStableSystemAppend();
+		const prompt = "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
+		const retrieved =
+			isRetrieveEnabled() && qmdAvailable ? await searchRelevantMemories(prompt) : "";
 
-		const caveat =
-			mode === "refresh"
-				? `Snapshot ${snapshotReason}. Use memory_read / memory_search for latest state.`
-				: "Loaded once at session start. Use memory_read / memory_search for authoritative latest state.";
+		const result: {
+			systemPrompt?: string;
+			message?: { customType: string; content: string; display: boolean };
+		} = {};
 
-		const header = [
-			"\n\n## Memory",
-			`(${caveat})`,
-			`Project root: ${PROJECT_ROOT}`,
-			`Store: ${MEMORY_DIR}`,
-			"Use memory_write to persist important information.",
-			"- Decisions / preferences / durable facts → MEMORY.md",
-			"- Day-to-day notes → daily/<YYYY-MM-DD>.md",
-			"- Checklist items → scratchpad tool",
-			"- Search past context → memory_search (keyword | semantic | deep)",
-			'- If someone says "remember this," write it immediately.',
-			"",
-			memoryContext,
-		].join("\n");
+		if (coreAppend) {
+			result.systemPrompt = event.systemPrompt + coreAppend;
+		}
+		if (retrieved) {
+			result.message = {
+				customType: "pi-memory-retrieve",
+				content: retrieved,
+				display: false,
+			};
+		}
 
-		return { systemPrompt: event.systemPrompt + header };
+		return Object.keys(result).length ? result : undefined;
 	});
 
-	// --- memory_write ---
 	pi.registerTool({
 		name: "memory_write",
 		label: "Memory Write",
 		description: [
 			"Write to this project's memory files under .pi/memory/.",
-			"- 'long_term': MEMORY.md (append or overwrite)",
-			"- 'daily': today's daily log (always append)",
-			"Use #tags and [[links]] for searchability.",
+			"- 'long_term': MEMORY.md (append or overwrite) — decisions, preferences, durable facts",
+			"- 'daily': today's daily log (always append) — running notes",
+			"Prefer tagged entries for recall, e.g.:",
+			"  #decision [[database-choice]] Chose PostgreSQL for backend services.",
+			"  #preference [[package-manager]] Always use pnpm, never npm.",
+			"  #lesson [[api-versioning]] URL prefix /v1/ avoids CDN cache issues.",
+			"Suggested tags (not enforced): #decision #preference #lesson #bug #fact plus [[wiki-links]].",
 		].join("\n"),
 		parameters: Type.Object({
 			target: StringEnum(["long_term", "daily"] as const, {
 				description: "Where to write",
 			}),
-			content: Type.String({ description: "Markdown content" }),
+			content: Type.String({ description: "Markdown content (use #tags and [[links]] when useful)" }),
 			mode: Type.Optional(
 				StringEnum(["append", "overwrite"] as const, {
 					description: "long_term only. Default: append",
@@ -1026,99 +1008,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- scratchpad ---
-	pi.registerTool({
-		name: "scratchpad",
-		label: "Scratchpad",
-		description: "Project checklist: add | done | undo | clear_done | list",
-		parameters: Type.Object({
-			action: StringEnum(["add", "done", "undo", "clear_done", "list"] as const),
-			text: Type.Optional(Type.String({ description: "Item text or substring match" })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx): Promise<ToolOut> {
-			ensureDirs();
-			const sid = shortSessionId(ctx.sessionManager.getSessionId());
-			const ts = nowTimestamp();
-			const existing = readFileSafe(SCRATCHPAD_FILE) ?? "";
-			const items = parseScratchpad(existing);
-
-			if (params.action === "list") {
-				if (items.length === 0) {
-					return { content: [{ type: "text" as const, text: "Scratchpad is empty." }], details: {} };
-				}
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: formatPreviewBlock("Scratchpad", serializeScratchpad(items), "start"),
-						},
-					],
-					details: { count: items.length, open: items.filter((i) => !i.done).length },
-				};
-			}
-
-			if (params.action === "add") {
-				if (!params.text) {
-					return {
-						content: [{ type: "text" as const, text: "Error: 'text' required for add." }],
-						isError: true,
-						details: {},
-					};
-				}
-				const serialized = scratchpadAdd(existing, params.text, `<!-- ${ts} [${sid}] -->`);
-				fs.writeFileSync(SCRATCHPAD_FILE, serialized, "utf-8");
-				await ensureQmdAvailableForUpdate();
-				scheduleQmdUpdate();
-				return {
-					content: [{ type: "text" as const, text: `Added: - [ ] ${params.text}` }],
-					details: { path: SCRATCHPAD_FILE },
-				};
-			}
-
-			if (params.action === "done" || params.action === "undo") {
-				if (!params.text) {
-					return {
-						content: [{ type: "text" as const, text: `Error: 'text' required for ${params.action}.` }],
-						isError: true,
-						details: {},
-					};
-				}
-				const { content, matched } = scratchpadToggle(existing, params.text, params.action === "done");
-				if (!matched) {
-					return {
-						content: [{ type: "text" as const, text: `No matching open/done item for: ${params.text}` }],
-						isError: true,
-						details: {},
-					};
-				}
-				fs.writeFileSync(SCRATCHPAD_FILE, content, "utf-8");
-				await ensureQmdAvailableForUpdate();
-				scheduleQmdUpdate();
-				return {
-					content: [{ type: "text" as const, text: `${params.action}: matched "${params.text}"` }],
-					details: {},
-				};
-			}
-
-			// clear_done
-			const { content, removed } = scratchpadClearDone(existing);
-			fs.writeFileSync(SCRATCHPAD_FILE, content, "utf-8");
-			await ensureQmdAvailableForUpdate();
-			scheduleQmdUpdate();
-			return {
-				content: [{ type: "text" as const, text: `Cleared ${removed} done item(s).` }],
-				details: { removed },
-			};
-		},
-	});
-
-	// --- memory_read ---
 	pi.registerTool({
 		name: "memory_read",
 		label: "Memory Read",
-		description: "Read MEMORY.md, SCRATCHPAD.md, a daily log, or list daily dates.",
+		description: "Read MEMORY.md, a daily log, or list daily dates.",
 		parameters: Type.Object({
-			target: StringEnum(["long_term", "scratchpad", "daily", "list_daily"] as const),
+			target: StringEnum(["long_term", "daily", "list_daily"] as const),
 			date: Type.Optional(Type.String({ description: "YYYY-MM-DD for daily (default: today)" })),
 		}),
 		async execute(_id, params): Promise<ToolOut> {
@@ -1146,9 +1041,9 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			let filePath: string;
-			if (params.target === "long_term") filePath = MEMORY_FILE;
-			else if (params.target === "scratchpad") filePath = SCRATCHPAD_FILE;
-			else {
+			if (params.target === "long_term") {
+				filePath = MEMORY_FILE;
+			} else {
 				const d = params.date ?? todayStr();
 				if (!isValidDailyDate(d)) {
 					return {
@@ -1174,7 +1069,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- memory_forget ---
 	pi.registerTool({
 		name: "memory_forget",
 		label: "Memory Forget",
@@ -1237,7 +1131,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- memory_restore ---
 	pi.registerTool({
 		name: "memory_restore",
 		label: "Memory Restore",
@@ -1263,8 +1156,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const dest =
-				record.target === "daily" && record.date ? dailyPath(record.date) : MEMORY_FILE;
+			const dest = record.target === "daily" && record.date ? dailyPath(record.date) : MEMORY_FILE;
 			const existing = readFileSafe(dest) ?? "";
 			const block = record.removedContent.join("\n\n");
 			const separator = existing.trim() ? "\n\n" : "";
@@ -1286,13 +1178,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- memory_search ---
 	pi.registerTool({
 		name: "memory_search",
 		label: "Memory Search",
 		description: [
 			"Search this project's memory via qmd (keyword | semantic | deep).",
 			"Uses the per-project qmd collection for <project>/.pi/memory/ — never the global pi-memory collection.",
+			"Keyword mode is best for #tags and [[wiki-links]].",
 			"See memory_status for the active collection name.",
 		].join("\n"),
 		parameters: Type.Object({
@@ -1381,7 +1273,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- memory_status ---
 	pi.registerTool({
 		name: "memory_status",
 		label: "Memory Status",
@@ -1399,13 +1290,12 @@ export default function (pi: ExtensionAPI) {
 			}
 			const mark = (ok: boolean) => (ok ? "✓" : "✗");
 			const lines = [
-				"# Memory status (project-scoped)",
+				"# Memory status (project-scoped PoC)",
 				"",
 				`- Project root: ${inv.projectRoot}`,
 				`- Memory dir: ${inv.dir}`,
 				`- Collection: \`${inv.collectionName}\``,
 				`- MEMORY.md: ${inv.longTermChars} chars`,
-				`- Scratchpad: ${inv.scratchpadOpen} open / ${inv.scratchpadTotal} total`,
 				`- Daily logs: ${inv.dailyCount}${inv.latestDaily ? ` (latest ${inv.latestDaily})` : ""}`,
 				"",
 				"## Search (qmd)",
@@ -1421,6 +1311,7 @@ export default function (pi: ExtensionAPI) {
 				"",
 				"## Config",
 				`- PI_MEMORY_SNAPSHOT: ${getSnapshotMode()}`,
+				`- PI_MEMORY_RETRIEVE: ${isRetrieveEnabled() ? "on" : "off"}`,
 				`- PI_MEMORY_QMD_UPDATE: ${getQmdUpdateMode()}`,
 				`- PI_MEMORY_DIR: ${process.env.PI_MEMORY_DIR ? "set" : "default (.pi/memory under project)"}`,
 				`- PI_MEMORY_PROJECT_ROOT: ${process.env.PI_MEMORY_PROJECT_ROOT ? "set" : "auto (git root / cwd)"}`,

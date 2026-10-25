@@ -1,0 +1,10 @@
+node_modules/
+*.js
+*.d.ts
+*.map
+.DS_Store
+.pi/memory/
+.env
+.envrc.local
+ref
+.pi/context-mode

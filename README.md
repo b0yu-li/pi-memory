@@ -38,7 +38,13 @@ Content conventions (not a schema). Prefer:
 
 Keyword search and turn retrieval find `#decision` / `database-choice` via qmd FTS.
 
-## Install (dev)
+## Install
+
+```bash
+pi install https://github.com/b0yu-li/pi-memory.git
+```
+
+### Install (dev)
 
 ```bash
 pi install ./   # from this repo

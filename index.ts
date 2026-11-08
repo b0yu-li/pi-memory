@@ -158,6 +158,39 @@ const CONTEXT_SEARCH_MAX_CHARS = 2_500;
 
 type TruncateMode = "start" | "end" | "middle";
 
+/**
+ * Adjust a UTF-16 index so a cut never lands inside a surrogate pair
+ * (slicing mid-pair yields a lone surrogate → garbled CJK/emoji in previews
+ * and injected context, even though the stored file is intact).
+ * If `index` points at the low half of a pair, step back so the full
+ * character is kept.
+ */
+function safeCutIndex(text: string, index: number): number {
+	const clamped = Math.max(0, Math.min(index, text.length));
+	if (clamped === 0 || clamped >= text.length) return clamped;
+	const c = text.charCodeAt(clamped);
+	if (
+		c >= 0xdc00 &&
+		c <= 0xdfff &&
+		text.charCodeAt(clamped - 1) >= 0xd800 &&
+		text.charCodeAt(clamped - 1) <= 0xdbff
+	) {
+		return clamped - 1;
+	}
+	return clamped;
+}
+
+/** slice(0, n) that never splits a surrogate pair. */
+function sliceStart(text: string, maxChars: number): string {
+	return text.slice(0, safeCutIndex(text, maxChars));
+}
+
+/** slice(-n) that never splits a surrogate pair. */
+function sliceEnd(text: string, maxChars: number): string {
+	if (maxChars >= text.length) return text;
+	return text.slice(safeCutIndex(text, text.length - maxChars));
+}
+
 interface PreviewResult {
 	preview: string;
 	truncated: boolean;
@@ -191,7 +224,7 @@ function truncateLines(lines: string[], maxLines: number, mode: TruncateMode) {
 
 function truncateText(text: string, maxChars: number, mode: TruncateMode) {
 	if (maxChars <= 0 || text.length <= maxChars) return { text, truncated: false };
-	if (mode === "end") return { text: text.slice(-maxChars), truncated: true };
+	if (mode === "end") return { text: sliceEnd(text, maxChars), truncated: true };
 	if (mode === "middle" && maxChars > 10) {
 		const marker = "... (truncated) ...";
 		const keep = maxChars - marker.length;
@@ -199,15 +232,15 @@ function truncateText(text: string, maxChars: number, mode: TruncateMode) {
 			const headCount = Math.ceil(keep / 2);
 			const tailCount = Math.floor(keep / 2);
 			return {
-				text: text.slice(0, headCount) + marker + text.slice(text.length - tailCount),
+				text: sliceStart(text, headCount) + marker + sliceEnd(text, tailCount),
 				truncated: true,
 			};
 		}
 	}
-	return { text: text.slice(0, maxChars), truncated: true };
+	return { text: sliceStart(text, maxChars), truncated: true };
 }
 
-function buildPreview(
+export function buildPreview(
 	content: string,
 	options: { maxLines: number; maxChars: number; mode: TruncateMode },
 ): PreviewResult {
@@ -446,7 +479,7 @@ export function sanitizeSearchPrompt(prompt: string): string {
 	return prompt
 		.replace(/[\x00-\x1f\x7f]/g, " ")
 		.trim()
-		.slice(0, 200);
+		.slice(0, safeCutIndex(prompt, 200));
 }
 
 let memorySnapshot: string | null = null;
@@ -795,7 +828,7 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 				const filePath = getQmdResultPath(r);
 				const clipped =
 					text.length > CONTEXT_SEARCH_MAX_CHARS
-						? `${text.slice(0, CONTEXT_SEARCH_MAX_CHARS)}\n…`
+						? `${sliceStart(text, CONTEXT_SEARCH_MAX_CHARS)}\n…`
 						: text.trim();
 				return filePath ? `_${filePath}_\n${clipped}` : clipped;
 			})

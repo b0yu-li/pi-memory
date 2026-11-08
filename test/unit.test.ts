@@ -9,6 +9,7 @@ import {
 	_setPaths,
 	bindProject,
 	buildMemoryContext,
+	buildPreview,
 	collectionNameForProject,
 	forgetBlocks,
 	isRetrieveEnabled,
@@ -133,5 +134,50 @@ describe("injection helpers", () => {
 		assert.ok(ctx.includes("fact one"));
 		assert.ok(!ctx.toLowerCase().includes("scratchpad"));
 		fs.rmSync(root, { recursive: true, force: true });
+	});
+});
+
+describe("surrogate-safe truncation (no garbled CJK/emoji)", () => {
+	const hasLoneSurrogate = (s: string): boolean => {
+		for (let i = 0; i < s.length; i++) {
+			const c = s.charCodeAt(i);
+			const hi = c >= 0xd800 && c <= 0xdbff;
+			const lo = c >= 0xdc00 && c <= 0xdfff;
+			if (hi && !(i + 1 < s.length && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return true;
+			if (lo && !(i > 0 && s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff)) return true;
+		}
+		return false;
+	};
+
+	it("start mode never splits a surrogate pair (odd boundary)", () => {
+		const text = "a" + "🧠".repeat(3000);
+		const r = buildPreview(text, { maxLines: Number.POSITIVE_INFINITY, maxChars: 4000, mode: "start" });
+		assert.ok(!hasLoneSurrogate(r.preview), "lone surrogate in start-mode preview");
+	});
+
+	it("end mode never splits a surrogate pair", () => {
+		const text = "ab" + "🧠".repeat(3000);
+		const r = buildPreview(text, { maxLines: Number.POSITIVE_INFINITY, maxChars: 4000, mode: "end" });
+		assert.ok(!hasLoneSurrogate(r.preview), "lone surrogate in end-mode preview");
+	});
+
+	it("middle mode never splits a surrogate pair", () => {
+		const text = "a" + "🧠".repeat(3000);
+		const r = buildPreview(text, { maxLines: 150, maxChars: 4000, mode: "middle" });
+		assert.ok(!hasLoneSurrogate(r.preview), "lone surrogate in middle-mode preview");
+	});
+
+	it("middle mode keeps whole CJK characters", () => {
+		const text = "记忆点".repeat(2000);
+		const r = buildPreview(text, { maxLines: 150, maxChars: 4000, mode: "middle" });
+		assert.ok(r.preview.includes("... (truncated) ..."));
+		assert.ok(!hasLoneSurrogate(r.preview));
+	});
+
+	it("sanitizeSearchPrompt never ends inside a surrogate pair", () => {
+		const prompt = "🧠".repeat(150); // 300 UTF-16 units > 200 cap
+		const s = sanitizeSearchPrompt(prompt);
+		assert.equal(s.length <= 200, true);
+		assert.ok(!hasLoneSurrogate(s), "lone surrogate at sanitize cut");
 	});
 });

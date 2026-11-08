@@ -161,6 +161,42 @@ export function readFileSafe(filePath: string): string | null {
 	}
 }
 
+/**
+ * Replace a file atomically (tmp file + rename in the same directory).
+ * Direct writeFileSync truncates the target first, so a failure mid-write
+ * (ENOSPC/EFBIG, SIGKILL) destroys the previous content. Verified by probe:
+ * under a file-size limit the whole store was lost. With tmp+rename the
+ * original stays intact on any failure.
+ */
+export function writeFileAtomic(filePath: string, content: string): void {
+	const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.tmp-${randomUUID()}`);
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(tmp, "w", 0o644);
+		fs.writeFileSync(fd, content, "utf-8");
+		fs.fsyncSync(fd);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			/* tmp may not exist */
+		}
+		throw err;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+	try {
+		fs.renameSync(tmp, filePath);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			/* ignore */
+		}
+		throw err;
+	}
+}
+
 const RESPONSE_PREVIEW_MAX_CHARS = 4_000;
 const RESPONSE_PREVIEW_MAX_LINES = 120;
 const CONTEXT_LONG_TERM_MAX_CHARS = 4_000;
@@ -278,6 +314,19 @@ export function buildPreview(
 		previewLines: preview ? preview.split("\n").length : 0,
 		previewChars: preview.length,
 	};
+}
+
+/** Tool-response body for memory_read: capped, with a truncation note. */
+export function previewMemoryContent(content: string): { text: string; truncated: boolean } {
+	const result = buildPreview(content, {
+		maxLines: RESPONSE_PREVIEW_MAX_LINES,
+		maxChars: RESPONSE_PREVIEW_MAX_CHARS,
+		mode: "middle",
+	});
+	const note = result.truncated
+		? `\n\n[truncated: showing ${result.previewLines}/${result.totalLines} lines, ${result.previewChars}/${result.totalChars} chars — use memory_search for targeted recall]`
+		: "";
+	return { text: `${result.preview}${note}`, truncated: result.truncated };
 }
 
 function formatPreviewBlock(label: string, content: string, mode: TruncateMode): string {
@@ -647,8 +696,11 @@ export function detectQmd(): Promise<boolean> {
 		return Promise.resolve(qmdAvailable);
 	}
 	return new Promise((resolve) => {
-		execFileFn("qmd", ["collection", "list"], { timeout: 15_000, encoding: "utf8" }, (err) => {
-			qmdAvailable = !err;
+			execFileFn("qmd", ["collection", "list"], { timeout: 15_000, encoding: "utf8" }, (err) => {
+				// Only a missing binary means "qmd not installed". Any other error
+				// (EACCES, broken install) should surface the real failure in
+				// memory_search instead of telling the user to install qmd.
+				qmdAvailable = !err || (err as NodeJS.ErrnoException).code !== "ENOENT";
 			qmdAvailabilityCheckedAt = Date.now();
 			resolve(qmdAvailable);
 		});
@@ -1019,7 +1071,7 @@ export default function (pi: ExtensionAPI) {
 				const existing = readFileSafe(filePath) ?? "";
 				const stamped = `<!-- ${ts} [${sid}] -->\n${content}`;
 				const separator = existing.trim() ? "\n\n" : "";
-				fs.writeFileSync(filePath, existing + separator + stamped, "utf-8");
+				writeFileAtomic(filePath, existing + separator + stamped);
 				await ensureQmdAvailableForUpdate();
 				scheduleQmdUpdate();
 				return {
@@ -1035,11 +1087,11 @@ export default function (pi: ExtensionAPI) {
 
 			const existing = readFileSafe(MEMORY_FILE) ?? "";
 			if (mode === "overwrite") {
-				fs.writeFileSync(MEMORY_FILE, `<!-- last updated: ${ts} [${sid}] -->\n${content}`, "utf-8");
+				writeFileAtomic(MEMORY_FILE, `<!-- last updated: ${ts} [${sid}] -->\n${content}`);
 			} else {
 				const stamped = `<!-- ${ts} [${sid}] -->\n${content}`;
 				const separator = existing.trim() ? "\n\n" : "";
-				fs.writeFileSync(MEMORY_FILE, existing + separator + stamped, "utf-8");
+				writeFileAtomic(MEMORY_FILE, existing + separator + stamped);
 			}
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
@@ -1110,9 +1162,12 @@ export default function (pi: ExtensionAPI) {
 					details: { path: filePath },
 				};
 			}
+			// Cap the response like every other content path — reading a large
+			// MEMORY.md must not flood the conversation.
+			const { text, truncated } = previewMemoryContent(content);
 			return {
-				content: [{ type: "text" as const, text: content }],
-				details: { path: filePath, chars: content.length },
+				content: [{ type: "text" as const, text }],
+				details: { path: filePath, chars: content.length, truncated },
 			};
 		},
 	});
@@ -1163,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const recovery = writeRecoveryRecord(target, recoveryDate, result.removed);
-			fs.writeFileSync(filePath, result.content, "utf-8");
+			writeFileAtomic(filePath, result.content);
 			refreshMemorySnapshot("memory_forget");
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
@@ -1208,7 +1263,7 @@ export default function (pi: ExtensionAPI) {
 			const existing = readFileSafe(dest) ?? "";
 			const block = record.removedContent.join("\n\n");
 			const separator = existing.trim() ? "\n\n" : "";
-			fs.writeFileSync(dest, existing + separator + block + (block.endsWith("\n") ? "" : "\n"), "utf-8");
+			writeFileAtomic(dest, existing + separator + block + (block.endsWith("\n") ? "" : "\n"));
 			record.restoredAt = new Date().toISOString();
 			fs.writeFileSync(recoveryFile, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
 			refreshMemorySnapshot("memory_restore");

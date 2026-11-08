@@ -5,18 +5,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
+	_clearQmdStatusCaches,
 	_getBinding,
+	_setExecFileForTest,
+	_resetExecFileForTest,
 	_setPaths,
 	bindProject,
 	buildMemoryContext,
 	buildPreview,
 	collectionNameForProject,
+	detectQmd,
 	ensureDirs,
 	forgetBlocks,
 	isRetrieveEnabled,
+	previewMemoryContent,
 	resolveMemoryDir,
 	resolveProjectRoot,
 	sanitizeSearchPrompt,
+	writeFileAtomic,
 } from "../index.ts";
 
 describe("project binding", () => {
@@ -216,5 +222,96 @@ describe("surrogate-safe truncation (no garbled CJK/emoji)", () => {
 		const s = sanitizeSearchPrompt(prompt);
 		assert.equal(s.length <= 200, true);
 		assert.ok(!hasLoneSurrogate(s), "lone surrogate at sanitize cut");
+	});
+});
+
+const hasLoneSurrogateIn = (s: string): boolean => {
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
+		const hi = c >= 0xd800 && c <= 0xdbff;
+		const lo = c >= 0xdc00 && c <= 0xdfff;
+		if (hi && !(i + 1 < s.length && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return true;
+		if (lo && !(i > 0 && s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff)) return true;
+	}
+	return false;
+};
+
+describe("store durability (proven probes)", () => {
+	it("writeFileAtomic leaves the original intact when the write fails (EFBIG)", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-atomic-"));
+		const store = path.join(root, "MEMORY.md");
+		const original = "Decisions: A\nB\nC\nD\nE\n";
+		fs.writeFileSync(store, original, "utf-8");
+
+		const child = path.join(root, "atomic-child.mjs");
+		fs.writeFileSync(
+			child,
+			[
+				`import { writeFileAtomic } from "${path.resolve("index.ts")}";`,
+				`import fs from "node:fs";`,
+				`try { writeFileAtomic(${JSON.stringify(store)}, "X".repeat(1024 * 1024)); console.log("ok"); }`,
+				`catch (e) { console.log("failed:", e.code); }`,
+				`console.log("intact:", fs.readFileSync(${JSON.stringify(store)}, "utf-8") === ${JSON.stringify(original)});`,
+				`console.log("tmp leftovers:", fs.readdirSync(${JSON.stringify(root)}).filter((f) => f.includes(".tmp-")).length);`,
+			].join("\n"),
+			"utf-8",
+		);
+		const { execFileSync } = await import("node:child_process");
+		let out = "";
+		try {
+			out = execFileSync("/bin/bash", ["-c", `ulimit -f 1; node ${JSON.stringify(child)}`], { encoding: "utf8" });
+		} catch (e: any) {
+			out = String(e.stdout ?? "");
+		}
+		assert.ok(out.includes("failed: EFBIG"), `expected EFBIG, got: ${out}`);
+		assert.ok(out.includes("intact: true"), `store must survive: ${out}`);
+		assert.ok(out.includes("tmp leftovers: 0"), `no tmp files may remain: ${out}`);
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	it("previewMemoryContent passes small content through untouched", () => {
+		const content = "#decision [[x]] keep this exact line\n";
+		const r = previewMemoryContent(content);
+		assert.equal(r.text, content.trim());
+		assert.equal(r.truncated, false);
+	});
+
+	it("previewMemoryContent caps large content instead of flooding context", () => {
+		const big = Array.from({ length: 5000 }, (_, i) => `entry line ${i} with some text`).join("\n");
+		const r = previewMemoryContent(big);
+		assert.equal(r.truncated, true);
+		assert.ok(r.text.length <= 4000 + 200, `capped text was ${r.text.length}`);
+		assert.ok(r.text.includes("[truncated:"));
+		assert.ok(!hasLoneSurrogateIn(r.text));
+	});
+});
+
+describe("qmd detection diagnostics (proven: EACCES mislabeled as 'not installed')", () => {
+	it("non-ENOENT spawn errors mean qmd exists (present but failing)", async () => {
+		_clearQmdStatusCaches();
+		_setExecFileForTest(((_cmd: string, _args: string[], _opts: unknown, cb: (e: Error | null) => void) => {
+			const err = Object.assign(new Error("spawn EACCES"), { code: "EACCES" });
+			cb(err, "", "");
+		}) as never);
+		try {
+			assert.equal(await detectQmd(), true, "qmd present but failing must not read as 'not installed'");
+		} finally {
+			_resetExecFileForTest();
+			_clearQmdStatusCaches();
+		}
+	});
+
+	it("ENOENT still means qmd is not installed", async () => {
+		_clearQmdStatusCaches();
+		_setExecFileForTest(((_cmd: string, _args: string[], _opts: unknown, cb: (e: Error | null) => void) => {
+			const err = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+			cb(err, "", "");
+		}) as never);
+		try {
+			assert.equal(await detectQmd(), false);
+		} finally {
+			_resetExecFileForTest();
+			_clearQmdStatusCaches();
+		}
 	});
 });

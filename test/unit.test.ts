@@ -13,6 +13,7 @@ import {
 	bindProject,
 	buildMemoryContext,
 	buildPreview,
+	collectionListIncludes,
 	collectionNameForProject,
 	detectQmd,
 	ensureDirs,
@@ -313,5 +314,27 @@ describe("qmd detection diagnostics (proven: EACCES mislabeled as 'not installed
 			_resetExecFileForTest();
 			_clearQmdStatusCaches();
 		}
+	});
+});
+
+describe("collectionListIncludes (extracted from checkCollection, fallback dedup)", () => {
+	it("matches string entries", () => {
+		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify(["pi-mem-x-abc", "other"])), true);
+		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify(["other"])), false);
+	});
+
+	it("matches object entries by name", () => {
+		assert.equal(
+			collectionListIncludes("pi-mem-x-abc", JSON.stringify([{ name: "pi-mem-x-abc" }, { name: "o" }])),
+			true,
+		);
+		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify([{ name: "o" }])), false);
+		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify([null, 5])), false);
+	});
+
+	it("falls back to substring match for non-array JSON and broken output", () => {
+		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify({ name: "pi-mem-x-abc" })), true);
+		assert.equal(collectionListIncludes("pi-mem-x-abc", "name: pi-mem-x-abc\nstatus: ok"), true);
+		assert.equal(collectionListIncludes("pi-mem-x-abc", "{broken json"), false);
 	});
 });

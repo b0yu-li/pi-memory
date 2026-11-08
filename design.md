@@ -146,6 +146,18 @@ If the user never tags, everything still works — body text remains searchable.
 
 **Suggested vocabulary** (guidance only, not validated): `#decision`, `#preference`, `#lesson`, `#bug`, `#fact`.
 
+## Code conventions
+
+Audited against the codebase (see commit history); applied via probe-driven review, not dogma.
+
+| Rule | Detail |
+|------|--------|
+| Guard clauses first | Early-return to kill nesting; the codebase already does this — max nesting 2–3. |
+| `else` allowed | Only for genuine two-way branches where **both arms do work** (e.g. overwrite vs append). A blanket ban was audited and **rejected**: 9/10 sites would get worse under forced inversion (duplicated conditions, negative logic). |
+| No `else` after `return` | An `else` arm immediately following a `return` in the if-arm is banned (ESLint `no-else-return` semantics); currently 0 occurrences. |
+| No duplicated fallbacks | A fallback must not appear in both `else` and `catch` — extract it (see `collectionListIncludes`). |
+| Probe before fix | Behavior changes require a runnable probe demonstrating impact; disproven candidates are measured and skipped with numbers (`test/probe.*.ts`). |
+
 ## Explicitly out / deferred
 
 | Item | Status |

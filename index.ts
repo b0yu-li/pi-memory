@@ -707,6 +707,27 @@ export function detectQmd(): Promise<boolean> {
 	});
 }
 
+/**
+ * Match a collection name in `qmd collection list --json` output.
+ * Tolerates both JSON arrays and plain text; falls back to a substring
+ * match when the output is not a recognizable JSON array.
+ */
+export function collectionListIncludes(name: string, out: string): boolean {
+	try {
+		const collections: unknown = JSON.parse(out);
+		if (Array.isArray(collections)) {
+			return collections.some((entry) => {
+				if (typeof entry === "string") return entry === name;
+				if (entry != null && typeof entry === "object") return (entry as { name?: unknown }).name === name;
+				return false;
+			});
+		}
+	} catch {
+		/* fall through to substring match */
+	}
+	return out.includes(name);
+}
+
 export function checkCollection(name: string = COLLECTION_NAME): Promise<boolean> {
 	const cached = qmdCollectionStatusCache.get(name);
 	const now = Date.now();
@@ -715,26 +736,8 @@ export function checkCollection(name: string = COLLECTION_NAME): Promise<boolean
 	}
 	return new Promise((resolve) => {
 		execFileFn("qmd", ["collection", "list", "--json"], { timeout: 10_000, encoding: "utf8" }, (err, stdout) => {
-			let exists = false;
 			const out = typeof stdout === "string" ? stdout : String(stdout ?? "");
-			if (!err) {
-				try {
-					const collections = JSON.parse(out);
-					if (Array.isArray(collections)) {
-						exists = collections.some((entry) => {
-							if (typeof entry === "string") return entry === name;
-							if (entry && typeof entry === "object" && "name" in entry) {
-								return (entry as { name?: string }).name === name;
-							}
-							return false;
-						});
-					} else {
-						exists = out.includes(name);
-					}
-				} catch {
-					exists = out.includes(name);
-				}
-			}
+			const exists = err ? false : collectionListIncludes(name, out);
 			qmdCollectionStatusCache.set(name, { checkedAt: Date.now(), exists });
 			resolve(exists);
 		});

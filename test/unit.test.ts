@@ -15,6 +15,7 @@ import {
 	buildPreview,
 	collectionListIncludes,
 	collectionNameForProject,
+	deriveQueryCandidates,
 	detectQmd,
 	ensureDirs,
 	forgetBlocks,
@@ -336,5 +337,28 @@ describe("collectionListIncludes (extracted from checkCollection, fallback dedup
 		assert.equal(collectionListIncludes("pi-mem-x-abc", JSON.stringify({ name: "pi-mem-x-abc" })), true);
 		assert.equal(collectionListIncludes("pi-mem-x-abc", "name: pi-mem-x-abc\nstatus: ok"), true);
 		assert.equal(collectionListIncludes("pi-mem-x-abc", "{broken json"), false);
+	});
+});
+
+describe("deriveQueryCandidates (conjunctive BM25 fix)", () => {
+	it("starts with the raw prompt and falls back to content words", () => {
+		const c = deriveQueryCandidates("What database did we choose for backend services?");
+		assert.equal(c[0], "What database did we choose for backend services?");
+		assert.ok(c[1].includes("database"));
+		assert.ok(!c[1].split(" ").some((t) => ["what", "did", "we", "for"].includes(t)), `stopwords must be stripped: ${c[1]}`);
+	});
+
+	it("produces adjacent pairs and long tokens as later candidates", () => {
+		const c = deriveQueryCandidates("Should the retry budget use jitter always");
+		const pairs = c.filter((x) => x.split(" ").length === 2);
+		assert.ok(pairs.includes("retry budget"), `pairs missing: ${JSON.stringify(c)}`);
+		assert.ok(c.includes("jitter"));
+	});
+
+	it("is deduplicated and bounded", () => {
+		const c = deriveQueryCandidates("jitter jitter jitter what what");
+		const set = new Set(c.map((x) => x.toLowerCase()));
+		assert.equal(c.length, set.size);
+		assert.ok(c.length <= 8);
 	});
 });

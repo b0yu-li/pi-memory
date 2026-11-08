@@ -25,7 +25,9 @@
 	],
 	"scripts": {
 		"build": "tsc -p tsconfig.json --noEmit",
-		"test": "node --experimental-strip-types --test test/unit.test.ts"
+		"test": "node --experimental-strip-types --test test/unit.test.ts",
+		"test:e2e": "node --experimental-strip-types test/e2e.ts",
+		"test:eval": "node --experimental-strip-types test/eval-recall.ts"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": ">=0.81.1",

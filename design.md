@@ -267,4 +267,10 @@ Score: keyword/entity presence in the assistant answer (same approach as ref). R
 - Tag/link guidance on `memory_write` + system prompt
 - Unit tests for binding, forget, sanitize, retrieve flag, core context
 
-**Still to build:** Level 2 e2e (esp. tags case 9 + cross-project) and Level 3 recall eval.
+**Built:** Level 2 e2e (`npm run test:e2e`, 10 cases, child-per-case isolation) and Level 3 recall eval (`npm run test:eval`, retrieval-only A vs memory-tools-only B, isolated corpus).
+
+Harness-probed facts codified in the test files:
+- qmd keyword search is **conjunctive** — raw NL prompts with function words get zero hits; `searchRelevantMemories` and `memory_search` therefore derive content-word candidate queries (raw → filtered → adjacent pairs → long tokens) until first hit. Eval-proven: retrieval-only recall 0/3 → 3/3.
+- Extension tools are NOT removed by `noTools`; other extensions inject tools (codemode `ctx_execute`) that defeat `excludeTools`; the harness uses `noExtensions` + inline factory.
+- The extension keeps module-global bindings — sessions across different projects must never be interleaved in one process (e2e runs child-per-case).
+- Deleting a temp project leaves a qmd collection that can mutate stale state; harness removes collections when done.

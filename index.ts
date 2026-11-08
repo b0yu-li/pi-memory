@@ -552,6 +552,43 @@ export function sanitizeSearchPrompt(prompt: string): string {
 		.slice(0, safeCutIndex(prompt, 200));
 }
 
+const QUERY_STOPWORDS = new Set([
+	"a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+	"have", "has", "had", "i", "you", "he", "she", "it", "we", "they", "what", "which", "who",
+	"whom", "this", "that", "these", "those", "of", "in", "on", "at", "to", "for", "with", "from",
+	"by", "as", "and", "or", "but", "if", "then", "than", "so", "not", "no", "yes", "can",
+	"could", "will", "would", "shall", "should", "may", "might", "must", "about", "into", "over",
+	"under", "after", "before", "between", "during", "through", "against", "without", "within",
+	"along", "across", "answer", "name", "only", "one", "short", "sentence", "reply", "use",
+	"used", "using", "tell", "give", "show", "find",
+]);
+
+/**
+ * Derive keyword-query candidates for conjunctive BM25 (qmd `search`):
+ * every query term must appear in a document, so raw natural-language
+ * prompts with function words reliably return zero hits (probed). Candidates
+ * go from most-specific to most-generic: raw prompt → content words →
+ * adjacent content-word pairs → long single tokens.
+ */
+export function deriveQueryCandidates(prompt: string): string[] {
+	const tokens = prompt
+		.toLowerCase()
+		.replace(/[^a-z0-9\s#+-]/g, " ")
+		.split(/\s+/)
+		.filter((t) => t.length >= 3 && !QUERY_STOPWORDS.has(t));
+	const candidates: string[] = [prompt.trim()];
+	if (tokens.length > 0) candidates.push(tokens.join(" "));
+	for (let i = 0; i < tokens.length - 1; i++) candidates.push(`${tokens[i]} ${tokens[i + 1]}`);
+	candidates.push(...tokens.filter((t) => t.length >= 6).slice(0, 4));
+	const seen = new Set<string>();
+	return candidates.filter((c) => {
+		const key = c.toLowerCase();
+		if (!c || seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
 let memorySnapshot: string | null = null;
 let snapshotTakenOnDate: string | null = null;
 let snapshotReason = "";
@@ -886,16 +923,26 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 		const hasCollection = await checkCollection(COLLECTION_NAME);
 		if (!hasCollection) return "";
 
+		// Try derivation candidates in order (raw → content words → pairs →
+		// long tokens); conjunctive BM25 means raw NL prompts often miss.
+		const attempts = deriveQueryCandidates(sanitized).slice(0, 8);
+		const searchAll = async (): Promise<QmdSearchResult[]> => {
+			for (const candidate of attempts) {
+				const { results } = await runQmdSearch("keyword", candidate, 3, 1_000);
+				if (results.length > 0) return results;
+			}
+			return [];
+		};
 		const results = await Promise.race([
-			runQmdSearch("keyword", sanitized, 3, 3_000),
+			searchAll(),
 			new Promise<never>((_, reject) => {
 				timer = setTimeout(() => reject(new Error("timeout")), 3_000);
 			}),
 		]);
 
-		if (!results || results.results.length === 0) return "";
+		if (!results || results.length === 0) return "";
 
-		const snippets = results.results
+		const snippets = results
 			.map((r) => {
 				const text = getQmdResultText(r);
 				if (!text.trim()) return null;
@@ -1326,7 +1373,21 @@ export default function (pi: ExtensionAPI) {
 			const mode = params.mode ?? "keyword";
 			const limit = clampSearchLimit(params.limit);
 			try {
-				const { results, stderr } = await runQmdSearch(mode, params.query, limit);
+				let { results, stderr } = await runQmdSearch(mode, params.query, limit);
+				let relaxedQuery: string | undefined;
+				// Keyword mode fallback: qmd search is conjunctive, so natural-
+				// language queries with function words return zero. Retry with
+				// derived content-word candidates before giving up.
+				if (mode === "keyword" && results.length === 0) {
+					for (const candidate of deriveQueryCandidates(params.query).slice(1, 6)) {
+						const retry = await runQmdSearch(mode, candidate, limit);
+						if (retry.results.length > 0) {
+							results = retry.results;
+							relaxedQuery = candidate;
+							break;
+						}
+					}
+				}
 				const needsEmbed = /need embeddings/i.test(stderr ?? "");
 				const embedStarted = needsEmbed ? ensureQmdEmbed() : false;
 
@@ -1344,7 +1405,8 @@ export default function (pi: ExtensionAPI) {
 								text: `No results for "${params.query}" (mode: ${mode}, collection: ${COLLECTION_NAME}).${embedHint}`,
 							},
 						],
-						details: { mode, collection: COLLECTION_NAME, count: 0, needsEmbed },
+						details: { mode, collection: COLLECTION_NAME, count: 0, needsEmbed, relaxedQuery },
+				// NOTE: relaxedQuery on a hit is reported in details below
 					};
 				}
 
@@ -1362,7 +1424,7 @@ export default function (pi: ExtensionAPI) {
 
 				return {
 					content: [{ type: "text" as const, text: formatted }],
-					details: { mode, collection: COLLECTION_NAME, count: results.length, needsEmbed },
+					details: { mode, collection: COLLECTION_NAME, count: results.length, needsEmbed, relaxedQuery },
 				};
 			} catch (err) {
 				return {

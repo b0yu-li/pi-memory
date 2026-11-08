@@ -58,7 +58,7 @@ let MEMORY_DIR = resolveMemoryDir(PROJECT_ROOT);
 let COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 let MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 let DAILY_DIR = path.join(MEMORY_DIR, "daily");
-let RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
+let RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 
 export function bindProject(
 	cwd: string,
@@ -69,7 +69,7 @@ export function bindProject(
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
-	RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
+	RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 	return { projectRoot: PROJECT_ROOT, memoryDir: MEMORY_DIR, collectionName: COLLECTION_NAME };
 }
 
@@ -80,7 +80,7 @@ export function _setPaths(projectRoot: string, memoryDir?: string) {
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
-	RECOVERY_DIR = path.join(MEMORY_DIR, "recovery");
+	RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 }
 
 export function _getBinding() {
@@ -97,6 +97,20 @@ export function _getBinding() {
 export function ensureDirs() {
 	fs.mkdirSync(MEMORY_DIR, { recursive: true });
 	fs.mkdirSync(DAILY_DIR, { recursive: true });
+	// Recovery records live in a dot-directory so qmd does not index deleted
+	// (forgotten) content back into search results. Migrate the legacy layout.
+	const legacyRecovery = path.join(MEMORY_DIR, "recovery");
+	try {
+		if (fs.existsSync(legacyRecovery)) {
+			fs.mkdirSync(RECOVERY_DIR, { recursive: true });
+			for (const file of fs.readdirSync(legacyRecovery)) {
+				fs.renameSync(path.join(legacyRecovery, file), path.join(RECOVERY_DIR, file));
+			}
+			fs.rmdirSync(legacyRecovery);
+		}
+	} catch {
+		/* keep legacy dir if migration fails */
+	}
 	fs.mkdirSync(RECOVERY_DIR, { recursive: true });
 }
 
@@ -342,6 +356,13 @@ export function forgetBlocks(content: string, match: string): { content: string;
 			flushCurrent();
 			currentLines = [line];
 			currentIsStamped = true;
+		} else if (currentIsStamped && line.trim() === "") {
+			// A blank line ends a stamped entry. Without this, any unstamped
+			// paragraphs after it would be glued to the entry and deleted
+			// together by memory_forget (over-deletion).
+			flushCurrent();
+			currentLines = [];
+			currentIsStamped = false;
 		} else {
 			currentLines.push(line);
 		}
@@ -483,13 +504,11 @@ export function sanitizeSearchPrompt(prompt: string): string {
 }
 
 let memorySnapshot: string | null = null;
-let snapshotDirty = false;
 let snapshotTakenOnDate: string | null = null;
 let snapshotReason = "";
 
 function refreshMemorySnapshot(reason: string) {
 	memorySnapshot = buildMemoryContext();
-	snapshotDirty = false;
 	snapshotTakenOnDate = todayStr();
 	snapshotReason = reason;
 }
@@ -502,7 +521,7 @@ function buildStableSystemAppend(): string {
 	const caveat =
 		mode === "refresh"
 			? `Snapshot ${snapshotReason}. Use memory_read / memory_search for latest state.`
-			: "Core loaded once at session start (byte-stable). Use memory_read / memory_search for authoritative latest state.";
+			: "Core is byte-stable between memory mutations; refreshed after memory_write/forget/restore and at day rollover. Use memory_read / memory_search for authoritative latest state.";
 
 	return [
 		"\n\n## Memory",
@@ -934,14 +953,11 @@ export default function (pi: ExtensionAPI) {
 			return core ? { systemPrompt: event.systemPrompt + core } : undefined;
 		}
 
-		const mode = getSnapshotMode();
-		if (mode === "refresh") {
-			const today = todayStr();
-			if (memorySnapshot === null || snapshotDirty || snapshotTakenOnDate !== today) {
-				refreshMemorySnapshot(snapshotDirty ? "long_term_write" : "day_rollover");
-			}
-		} else if (memorySnapshot === null) {
-			refreshMemorySnapshot("before_agent_start");
+		// Snapshot policy (both modes): byte-stable between mutations, refreshed
+		// on first use, after any memory mutation (write/forget/restore refresh
+		// eagerly), and at local day rollover so "today" stays correct.
+		if (memorySnapshot === null || snapshotTakenOnDate !== todayStr()) {
+			refreshMemorySnapshot(memorySnapshot === null ? "session_start" : "day_rollover");
 		}
 
 		const coreAppend = buildStableSystemAppend();
@@ -1017,7 +1033,6 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			snapshotDirty = true;
 			const existing = readFileSafe(MEMORY_FILE) ?? "";
 			if (mode === "overwrite") {
 				fs.writeFileSync(MEMORY_FILE, `<!-- last updated: ${ts} [${sid}] -->\n${content}`, "utf-8");
@@ -1028,7 +1043,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
-			if (getSnapshotMode() === "refresh") refreshMemorySnapshot("long_term_write");
+			refreshMemorySnapshot("long_term_write");
 			return {
 				content: [
 					{

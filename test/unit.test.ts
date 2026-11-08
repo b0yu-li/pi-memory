@@ -11,6 +11,7 @@ import {
 	buildMemoryContext,
 	buildPreview,
 	collectionNameForProject,
+	ensureDirs,
 	forgetBlocks,
 	isRetrieveEnabled,
 	resolveMemoryDir,
@@ -94,6 +95,42 @@ describe("store helpers", () => {
 		const { content: next, removed } = forgetBlocks(content, "mysql");
 		assert.equal(removed.length, 0);
 		assert.ok(next.includes("#decision [[database-choice]]"));
+	});
+
+	it("forgetBlocks does not delete unstamped text after a stamped entry", () => {
+		const content = [
+			"<!-- 2026-01-01 10:00:00 [abcd1234] -->",
+			"#preference Always use pnpm",
+			"",
+			"Unstamped scratch note that must survive.",
+			"",
+			"<!-- 2026-01-02 10:00:00 [abcd1234] -->",
+			"#decision Chose postgres",
+			"",
+		].join("\n");
+		const { content: next, removed } = forgetBlocks(content, "pnpm");
+		assert.equal(removed.length, 1);
+		assert.ok(next.includes("Unstamped scratch note that must survive."));
+		assert.ok(next.includes("postgres"));
+		assert.ok(!next.includes("pnpm"));
+	});
+
+	it("ensureDirs migrates legacy recovery/ to .recovery/ (not qmd-indexed)", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-rec-"));
+		const mem = path.join(root, ".pi", "memory");
+		fs.mkdirSync(path.join(mem, "recovery"), { recursive: true });
+		fs.writeFileSync(
+			path.join(mem, "recovery", "11111111-2222-4333-8444-555555555555.json"),
+			"{}",
+			"utf-8",
+		);
+		_setPaths(root, mem);
+		ensureDirs();
+		const b = _getBinding();
+		assert.equal(b.recoveryDir, path.join(mem, ".recovery"));
+		assert.ok(fs.existsSync(path.join(mem, ".recovery", "11111111-2222-4333-8444-555555555555.json")));
+		assert.ok(!fs.existsSync(path.join(mem, "recovery")));
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 
 	it("_setPaths for tests", () => {

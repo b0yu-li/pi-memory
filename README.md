@@ -17,7 +17,7 @@ The only commands you need after install are in [Install](#install) below. Every
 <projectRoot>/.pi/memory/
   MEMORY.md
   daily/YYYY-MM-DD.md
-  recovery/<uuid>.json
+  .recovery/<uuid>.json   # dot-dir so qmd never indexes deleted content
 ```
 
 No scratchpad. Project root = git root from session `cwd`, else `cwd`.
@@ -61,7 +61,7 @@ All settings are **optional** and default to sensible values. You should not nee
 | `PI_MEMORY_CORE` | `today+memory` | Always-on core composition |
 | `PI_MEMORY_RETRIEVE` | `on` | Turn-message qmd retrieval (`off` to disable) |
 | `PI_MEMORY_QMD_UPDATE` | `background` | `background` \| `manual` \| `off` |
-| `PI_MEMORY_SNAPSHOT` | `stable` | `per-turn` rebuilds the system prompt every turn (busts KV cache — avoid) |
+| `PI_MEMORY_SNAPSHOT` | `stable` | Core snapshot policy: both `stable` and `refresh` are byte-stable between memory mutations and refresh on write/forget/restore + day rollover; they differ only in the caveat wording injected with the core (`refresh` logs the mutation reason) |
 | `PI_MEMORY_QMD_SEARCH_TIMEOUT_MS` | internal | Timeout for qmd searches |
 | `PI_MEMORY_EMBED_PROBE_TIMEOUT_MS` | internal | Timeout for embed availability probe |
 

@@ -39,7 +39,7 @@ Reference intake: `ref/pi-memory` (jayzeng/pi-memory). This document defines **o
 <project>/.pi/memory/
   MEMORY.md           # curated long-term
   daily/YYYY-MM-DD.md # append-only daily log
-  recovery/<uuid>.json
+  .recovery/<uuid>.json  # dot-dir so qmd never indexes deleted content
 ```
 
 No `SCRATCHPAD.md`. Plain markdown; git-friendly. Prefer gitignoring `.pi/memory/` unless the team wants shared memory.
@@ -68,7 +68,7 @@ Ref’s three modes:
 | Mode | Behavior | Quality | Tokens / cache |
 |------|----------|---------|----------------|
 | `stable` (ref default) | Snapshot once; same bytes every turn | Always-on dump; no prompt-relevance | Cheap cache; many unrelated tokens |
-| `refresh` | Re-snapshot on long-term write / day rollover | Fresher dump | Occasional full cache bust |
+| `refresh` | Same refresh policy as `stable` (mutations + day rollover); differs only in caveat wording | Fresher dump | Occasional full cache bust |
 | `per-turn` | Rebuild system block + qmd keyword top-3 on user prompt | Better relevance | **Busts KV cache every turn** |
 
 Ref per-turn mechanics (`searchRelevantMemories`):
@@ -104,7 +104,7 @@ That couples **relevance** to **prefix instability**. Unnecessary.
 
 | Layer | What | Where | Changes when |
 |-------|------|-------|--------------|
-| **Core** | Today’s daily + MEMORY.md | System prompt | Session start; forget/restore; optional refresh on long-term write |
+| **Core** | Today’s daily + MEMORY.md | System prompt | Session start; after any mutation (write/forget/restore); day rollover |
 | **Retrieved** | Top-N qmd hits for this prompt | Turn message via `before_agent_start` | Every user prompt (only this tail changes) |
 | **On-demand** | Full file / deeper search | `memory_read` / `memory_search` | Agent chooses |
 

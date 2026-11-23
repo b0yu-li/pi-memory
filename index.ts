@@ -58,6 +58,10 @@ let MEMORY_DIR = resolveMemoryDir(PROJECT_ROOT);
 let COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 let MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 let DAILY_DIR = path.join(MEMORY_DIR, "daily");
+let KNOWLEDGE_DIR = path.join(MEMORY_DIR, "knowledge");
+let ARCHIVE_DIR = path.join(MEMORY_DIR, "archive");
+let ARCHIVE_DAILY_DIR = path.join(ARCHIVE_DIR, "daily");
+let ARCHIVE_SUPERSEDED_FILE = path.join(ARCHIVE_DIR, "superseded.md");
 let RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 
 export function bindProject(
@@ -69,6 +73,10 @@ export function bindProject(
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
+	KNOWLEDGE_DIR = path.join(MEMORY_DIR, "knowledge");
+	ARCHIVE_DIR = path.join(MEMORY_DIR, "archive");
+	ARCHIVE_DAILY_DIR = path.join(ARCHIVE_DIR, "daily");
+	ARCHIVE_SUPERSEDED_FILE = path.join(ARCHIVE_DIR, "superseded.md");
 	RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 	return { projectRoot: PROJECT_ROOT, memoryDir: MEMORY_DIR, collectionName: COLLECTION_NAME };
 }
@@ -80,6 +88,10 @@ export function _setPaths(projectRoot: string, memoryDir?: string) {
 	COLLECTION_NAME = collectionNameForProject(PROJECT_ROOT);
 	MEMORY_FILE = path.join(MEMORY_DIR, "MEMORY.md");
 	DAILY_DIR = path.join(MEMORY_DIR, "daily");
+	KNOWLEDGE_DIR = path.join(MEMORY_DIR, "knowledge");
+	ARCHIVE_DIR = path.join(MEMORY_DIR, "archive");
+	ARCHIVE_DAILY_DIR = path.join(ARCHIVE_DIR, "daily");
+	ARCHIVE_SUPERSEDED_FILE = path.join(ARCHIVE_DIR, "superseded.md");
 	RECOVERY_DIR = path.join(MEMORY_DIR, ".recovery");
 }
 
@@ -90,6 +102,10 @@ export function _getBinding() {
 		collectionName: COLLECTION_NAME,
 		memoryFile: MEMORY_FILE,
 		dailyDir: DAILY_DIR,
+		knowledgeDir: KNOWLEDGE_DIR,
+		archiveDir: ARCHIVE_DIR,
+		archiveDailyDir: ARCHIVE_DAILY_DIR,
+		archiveSupersededFile: ARCHIVE_SUPERSEDED_FILE,
 		recoveryDir: RECOVERY_DIR,
 	};
 }
@@ -97,6 +113,9 @@ export function _getBinding() {
 export function ensureDirs() {
 	fs.mkdirSync(MEMORY_DIR, { recursive: true });
 	fs.mkdirSync(DAILY_DIR, { recursive: true });
+	fs.mkdirSync(KNOWLEDGE_DIR, { recursive: true });
+	fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+	fs.mkdirSync(ARCHIVE_DAILY_DIR, { recursive: true });
 	// Recovery records live in a dot-directory so qmd does not index deleted
 	// (forgotten) content back into search results. Migrate the legacy layout.
 	const legacyRecovery = path.join(MEMORY_DIR, "recovery");
@@ -112,6 +131,21 @@ export function ensureDirs() {
 		/* keep legacy dir if migration fails */
 	}
 	fs.mkdirSync(RECOVERY_DIR, { recursive: true });
+}
+
+export function sanitizeTopicName(raw: string): string {
+	return (
+		raw
+			.toLowerCase()
+			.replace(/[^a-z0-9_-]/g, "-")
+			.replace(/-+/g, "-")
+			.replace(/^-|-$/g, "") || "general"
+	);
+}
+
+export function knowledgePath(topic: string): string {
+	const clean = sanitizeTopicName(topic);
+	return path.join(KNOWLEDGE_DIR, `${clean}.md`);
 }
 
 function dailyPath(date: string): string {
@@ -197,14 +231,14 @@ export function writeFileAtomic(filePath: string, content: string): void {
 	}
 }
 
-const RESPONSE_PREVIEW_MAX_CHARS = 4_000;
-const RESPONSE_PREVIEW_MAX_LINES = 120;
-const CONTEXT_LONG_TERM_MAX_CHARS = 4_000;
-const CONTEXT_LONG_TERM_MAX_LINES = 150;
-const CONTEXT_DAILY_MAX_CHARS = 3_000;
-const CONTEXT_DAILY_MAX_LINES = 120;
-const CONTEXT_MAX_CHARS = 8_000;
-const CONTEXT_SEARCH_MAX_CHARS = 2_500;
+const RESPONSE_PREVIEW_MAX_CHARS = 24_000;
+const RESPONSE_PREVIEW_MAX_LINES = 500;
+const CONTEXT_LONG_TERM_MAX_CHARS = 24_000;
+const CONTEXT_LONG_TERM_MAX_LINES = 500;
+const CONTEXT_DAILY_MAX_CHARS = 4_000;
+const CONTEXT_DAILY_MAX_LINES = 150;
+const CONTEXT_MAX_CHARS = 32_000;
+const CONTEXT_SEARCH_MAX_CHARS = 3_000;
 
 type TruncateMode = "start" | "end" | "middle";
 
@@ -364,7 +398,7 @@ const MEMORY_ENTRY_META_COMMENT_REGEX =
 	/^<!-- (?:(?:last updated: )?\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}|HANDOFF \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]\r\n]+\] -->$/;
 const RECOVERY_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type MemoryTarget = "long_term" | "daily";
+type MemoryTarget = "long_term" | "daily" | "compaction";
 
 interface RecoveryRecord {
 	version: 1;
@@ -374,6 +408,8 @@ interface RecoveryRecord {
 	date?: string;
 	removedContent: string[];
 	restoredAt?: string;
+	originalMemory?: string;
+	archivedDailies?: string[];
 }
 
 export function forgetBlocks(content: string, match: string): { content: string; removed: string[] } {
@@ -444,10 +480,9 @@ function isRecoveryRecord(value: unknown): value is RecoveryRecord {
 		record.version === 1 &&
 		typeof record.id === "string" &&
 		RECOVERY_ID_REGEX.test(record.id) &&
-		(record.target === "long_term" || record.target === "daily") &&
+		(record.target === "long_term" || record.target === "daily" || record.target === "compaction") &&
 		(record.target !== "daily" || (typeof record.date === "string" && isValidDailyDate(record.date))) &&
 		Array.isArray(record.removedContent) &&
-		record.removedContent.length > 0 &&
 		record.removedContent.every((e) => typeof e === "string")
 	);
 }
@@ -479,6 +514,471 @@ function readRecoveryRecord(recoveryId: string): { record: RecoveryRecord; fileP
 	} catch {
 		return null;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous Zero-Touch Compaction Engine
+// ---------------------------------------------------------------------------
+
+export const COMPACTION_MEMORY_MAX_CHARS = 24_000;
+export const COMPACTION_MEMORY_MAX_LINES = 500;
+export const COMPACTION_DAILY_MAX_DAYS = 14;
+
+export function shouldCompactMemory(content: string): boolean {
+	if (!content.trim()) return false;
+	const lines = content.split("\n");
+	return lines.length > COMPACTION_MEMORY_MAX_LINES || content.length > COMPACTION_MEMORY_MAX_CHARS;
+}
+
+export function extractDeduplicationKey(block: string): string | null {
+	// Look for [[tag-link]] first
+	const linkMatch = block.match(/\[\[([a-zA-Z0-9_-]+)\]\]/);
+	if (linkMatch) return linkMatch[1].toLowerCase();
+
+	const headerMatch = block.match(/^(?:#|##|###)\s+([^\n\r]+)/m);
+	if (headerMatch) return headerMatch[1].trim().toLowerCase();
+
+	return null;
+}
+
+export function parseMemoryEntries(content: string): Array<{ raw: string; key: string | null; stamped: boolean }> {
+	const normalized = content.replace(/\r\n?/g, "\n").replace(/^\uFEFF/, "");
+	const entries: Array<{ raw: string; key: string | null; stamped: boolean }> = [];
+	let currentLines: string[] = [];
+	let isStamped = false;
+
+	const flush = () => {
+		const raw = currentLines.join("\n").trim();
+		if (!raw) return;
+		entries.push({
+			raw,
+			key: extractDeduplicationKey(raw),
+			stamped: isStamped,
+		});
+		currentLines = [];
+		isStamped = false;
+	};
+
+	for (const line of normalized.split("\n")) {
+		if (MEMORY_ENTRY_META_COMMENT_REGEX.test(line.trim())) {
+			flush();
+			currentLines.push(line);
+			isStamped = true;
+		} else if (isStamped && line.trim() === "" && currentLines.length > 1) {
+			currentLines.push(line);
+		} else if (!isStamped && line.trim() === "" && currentLines.length > 0) {
+			flush();
+		} else {
+			currentLines.push(line);
+		}
+	}
+	flush();
+	return entries;
+}
+
+export function archiveAgingDailyLogs(daysToKeep = COMPACTION_DAILY_MAX_DAYS): string[] {
+	ensureDirs();
+	const moved: string[] = [];
+	let files: string[] = [];
+	try {
+		files = fs.readdirSync(DAILY_DIR).filter((f) => f.endsWith(".md"));
+	} catch {
+		return [];
+	}
+
+	const cutoffDate = new Date();
+	cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+	const cutoffStr = localDateStr(cutoffDate);
+
+	for (const f of files) {
+		const datePart = f.replace(/\.md$/, "");
+		if (isValidDailyDate(datePart) && datePart < cutoffStr) {
+			const src = path.join(DAILY_DIR, f);
+			const dst = path.join(ARCHIVE_DAILY_DIR, f);
+			try {
+				fs.renameSync(src, dst);
+				moved.push(f);
+			} catch {
+				/* ignore if rename fails */
+			}
+		}
+	}
+	return moved;
+}
+
+let qmdCleanupTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function scheduleQmdCleanup(delayMs = 2_000) {
+	if (!qmdAvailable) return;
+	if (qmdCleanupTimer) clearTimeout(qmdCleanupTimer);
+	qmdCleanupTimer = setTimeout(() => {
+		execFileFn("qmd", ["cleanup"], { timeout: 15_000 }, () => {
+			/* fire and forget */
+		});
+	}, delayMs);
+}
+
+export interface CompactionResult {
+	triggered: boolean;
+	reason?: string;
+	recoveryId?: string;
+	supersededCount: number;
+	archivedDailiesCount: number;
+	knowledgeCreatedCount: number;
+	beforeChars: number;
+	afterChars: number;
+	beforeLines: number;
+	afterLines: number;
+}
+
+let isCompacting = false;
+
+export async function runAutonomousCompaction(reason = "lifecycle"): Promise<CompactionResult> {
+	if (isCompacting) {
+		return {
+			triggered: false,
+			supersededCount: 0,
+			archivedDailiesCount: 0,
+			knowledgeCreatedCount: 0,
+			beforeChars: 0,
+			afterChars: 0,
+			beforeLines: 0,
+			afterLines: 0,
+		};
+	}
+	isCompacting = true;
+	const compStartTime = Date.now();
+	try {
+		ensureDirs();
+		const originalMemory = readFileSafe(MEMORY_FILE) ?? "";
+		const memoryOverThreshold = shouldCompactMemory(originalMemory);
+		const agingDailies = archiveAgingDailyLogs(COMPACTION_DAILY_MAX_DAYS);
+
+		if (!memoryOverThreshold && agingDailies.length === 0) {
+			return {
+				triggered: false,
+				supersededCount: 0,
+				archivedDailiesCount: 0,
+				knowledgeCreatedCount: 0,
+				beforeChars: originalMemory.length,
+				afterChars: originalMemory.length,
+				beforeLines: originalMemory.split("\n").length,
+				afterLines: originalMemory.split("\n").length,
+			};
+		}
+
+		const beforeChars = originalMemory.length;
+		const beforeLines = originalMemory.split("\n").length;
+		let recoveryId: string | undefined;
+
+		let supersededCount = 0;
+		let knowledgeCreatedCount = 0;
+		let newMemory = originalMemory;
+
+		if (memoryOverThreshold) {
+			const entries = parseMemoryEntries(originalMemory);
+			// 1. Invariant deduplication: keep latest entry for each key
+			const keyToLatestIndex = new Map<string, number>();
+			entries.forEach((e, idx) => {
+				if (e.key) keyToLatestIndex.set(e.key, idx);
+			});
+
+			const activeEntries: typeof entries = [];
+			const supersededEntries: typeof entries = [];
+
+			entries.forEach((e, idx) => {
+				if (e.key && keyToLatestIndex.get(e.key) !== idx) {
+					supersededEntries.push(e);
+				} else {
+					activeEntries.push(e);
+				}
+			});
+
+			supersededCount = supersededEntries.length;
+
+			// Append superseded entries to ARCHIVE_SUPERSEDED_FILE
+			if (supersededEntries.length > 0) {
+				const existingArchive = readFileSafe(ARCHIVE_SUPERSEDED_FILE) ?? "";
+				const ts = nowTimestamp();
+				const archivedBlocks = supersededEntries.map(
+					(e) => `<!-- superseded archived ${ts} -->\n${e.raw}`,
+				);
+				const sep = existingArchive.trim() ? "\n\n" : "";
+				writeFileAtomic(ARCHIVE_SUPERSEDED_FILE, existingArchive + sep + archivedBlocks.join("\n\n"));
+			}
+
+			// 2. If active entries still exceed threshold, migrate large blocks (>800 chars or >25 lines) to knowledge/
+			const finalEntries: string[] = [];
+
+			for (const e of activeEntries) {
+				const isLarge = e.raw.length > 800 || e.raw.split("\n").length > 25;
+				if (isLarge && e.key) {
+					const topic = sanitizeTopicName(e.key);
+					const kPath = knowledgePath(topic);
+					const existingK = readFileSafe(kPath) ?? "";
+					const sep = existingK.trim() ? "\n\n" : "";
+					writeFileAtomic(kPath, existingK + sep + e.raw);
+					knowledgeCreatedCount++;
+					const contentLines = e.raw
+						.split("\n")
+						.map((l) => l.trim())
+						.filter((l) => l && !l.startsWith("<!--"));
+					const summary = contentLines.slice(0, 2).join(" ");
+					finalEntries.push(
+						`<!-- migrated to knowledge/${topic}.md -->\n${summary ? `${summary}\n` : ""}#fact [[${topic}]] Full dossier preserved in knowledge/${topic}.md`,
+					);
+				} else {
+					finalEntries.push(e.raw);
+				}
+			}
+
+			newMemory = finalEntries.join("\n\n");
+
+			// Write recovery record
+			const rec: RecoveryRecord = {
+				version: 1,
+				id: randomUUID(),
+				createdAt: new Date().toISOString(),
+				target: "compaction" as MemoryTarget,
+				removedContent: supersededEntries.map((e) => e.raw),
+				originalMemory,
+				archivedDailies: agingDailies,
+			};
+			const recPath = recoveryPath(rec.id);
+			if (recPath) {
+				fs.writeFileSync(recPath, `${JSON.stringify(rec, null, 2)}\n`, "utf-8");
+				recoveryId = rec.id;
+			}
+
+			writeFileAtomic(MEMORY_FILE, newMemory);
+			refreshMemorySnapshot("autonomous_compaction");
+		}
+
+		scheduleQmdCleanup();
+		scheduleQmdUpdate();
+
+		const compDurationMs = Date.now() - compStartTime;
+		recordCompactionTelemetry({
+			reason,
+			durationMs: compDurationMs,
+			beforeChars,
+			afterChars: newMemory.length,
+			supersededCount,
+			archivedDailiesCount: agingDailies.length,
+			knowledgeCreatedCount,
+		});
+		logDebug(
+			`autonomous compaction (${reason}): ${beforeChars} -> ${newMemory.length} chars (${supersededCount} superseded, ${knowledgeCreatedCount} knowledge, ${agingDailies.length} dailies) in ${compDurationMs}ms`,
+		);
+
+		return {
+			triggered: true,
+			reason,
+			recoveryId,
+			supersededCount,
+			archivedDailiesCount: agingDailies.length,
+			knowledgeCreatedCount,
+			beforeChars,
+			afterChars: newMemory.length,
+			beforeLines,
+			afterLines: newMemory.split("\n").length,
+		};
+	} finally {
+		isCompacting = false;
+	}
+}
+
+export function maybeTriggerAutonomousCompaction(triggerReason: string) {
+	// Run non-blocking in background
+	setImmediate(() => {
+		runAutonomousCompaction(triggerReason).catch(() => {
+			/* fail soft */
+		});
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry & Metrics Ledger (persisted in .recovery/telemetry.json)
+// ---------------------------------------------------------------------------
+
+export interface TelemetryState {
+	version: 1;
+	retrievalStats: {
+		totalTurns: number;
+		hits: number;
+		misses: number;
+		timeouts: number;
+		totalDurationMs: number;
+		avgDurationMs: number;
+		recentSearches: Array<{
+			timestamp: string;
+			promptSnippet: string;
+			winnerCandidate: string | null;
+			hits: number;
+			durationMs: number;
+		}>;
+	};
+	compactionHistory: Array<{
+		timestamp: string;
+		reason: string;
+		durationMs: number;
+		beforeChars: number;
+		afterChars: number;
+		supersededCount: number;
+		archivedDailiesCount: number;
+		knowledgeCreatedCount: number;
+	}>;
+	searchStats: {
+		totalSearches: number;
+		byMode: {
+			keyword: number;
+			semantic: number;
+			deep: number;
+		};
+		avgDurationMs: number;
+		recentQueries: Array<{
+			timestamp: string;
+			mode: string;
+			querySnippet: string;
+			hits: number;
+			durationMs: number;
+			error?: string;
+		}>;
+	};
+}
+
+function initialTelemetryState(): TelemetryState {
+	return {
+		version: 1,
+		retrievalStats: {
+			totalTurns: 0,
+			hits: 0,
+			misses: 0,
+			timeouts: 0,
+			totalDurationMs: 0,
+			avgDurationMs: 0,
+			recentSearches: [],
+		},
+		compactionHistory: [],
+		searchStats: {
+			totalSearches: 0,
+			byMode: { keyword: 0, semantic: 0, deep: 0 },
+			avgDurationMs: 0,
+			recentQueries: [],
+		},
+	};
+}
+
+export function telemetryPath(): string {
+	return path.join(RECOVERY_DIR, "telemetry.json");
+}
+
+export function readTelemetry(): TelemetryState {
+	ensureDirs();
+	const content = readFileSafe(telemetryPath());
+	if (!content) return initialTelemetryState();
+	try {
+		const parsed = JSON.parse(content);
+		if (parsed && parsed.version === 1) return parsed as TelemetryState;
+	} catch {
+		/* ignore */
+	}
+	return initialTelemetryState();
+}
+
+export function writeTelemetryAtomic(state: TelemetryState) {
+	try {
+		ensureDirs();
+		writeFileAtomic(telemetryPath(), JSON.stringify(state, null, 2));
+	} catch {
+		/* non-critical telemetry failure must never break execution */
+	}
+}
+
+export function isDebugEnabled(): boolean {
+	const envVal = (process.env.PI_MEMORY_DEBUG ?? process.env.DEBUG ?? "").toLowerCase();
+	return envVal === "1" || envVal === "true" || envVal.includes("pi-memory");
+}
+
+export function logDebug(msg: string, ...args: unknown[]) {
+	if (!isDebugEnabled()) return;
+	const ts = new Date().toISOString().slice(11, 19);
+	console.error(`[pi-memory ${ts}] ${msg}`, ...args);
+}
+
+export function recordRetrievalTelemetry(entry: {
+	promptSnippet: string;
+	winnerCandidate: string | null;
+	hits: number;
+	durationMs: number;
+	timedOut?: boolean;
+}) {
+	const state = readTelemetry();
+	const r = state.retrievalStats;
+	r.totalTurns++;
+	if (entry.timedOut) r.timeouts++;
+	if (entry.hits > 0) r.hits++;
+	else r.misses++;
+	r.totalDurationMs += entry.durationMs;
+	r.avgDurationMs = Math.round(r.totalDurationMs / r.totalTurns);
+
+	r.recentSearches.unshift({
+		timestamp: nowTimestamp(),
+		promptSnippet: entry.promptSnippet.slice(0, 80),
+		winnerCandidate: entry.winnerCandidate,
+		hits: entry.hits,
+		durationMs: entry.durationMs,
+	});
+	if (r.recentSearches.length > 50) r.recentSearches = r.recentSearches.slice(0, 50);
+
+	writeTelemetryAtomic(state);
+}
+
+export function recordCompactionTelemetry(entry: {
+	reason: string;
+	durationMs: number;
+	beforeChars: number;
+	afterChars: number;
+	supersededCount: number;
+	archivedDailiesCount: number;
+	knowledgeCreatedCount: number;
+}) {
+	const state = readTelemetry();
+	state.compactionHistory.unshift({
+		timestamp: nowTimestamp(),
+		...entry,
+	});
+	if (state.compactionHistory.length > 50) {
+		state.compactionHistory = state.compactionHistory.slice(0, 50);
+	}
+	writeTelemetryAtomic(state);
+}
+
+export function recordSearchTelemetry(entry: {
+	mode: "keyword" | "semantic" | "deep";
+	querySnippet: string;
+	hits: number;
+	durationMs: number;
+	error?: string;
+}) {
+	const state = readTelemetry();
+	const s = state.searchStats;
+	s.totalSearches++;
+	s.byMode[entry.mode] = (s.byMode[entry.mode] || 0) + 1;
+	const prevTotal = s.avgDurationMs * (s.totalSearches - 1);
+	s.avgDurationMs = Math.round((prevTotal + entry.durationMs) / s.totalSearches);
+
+	s.recentQueries.unshift({
+		timestamp: nowTimestamp(),
+		mode: entry.mode,
+		querySnippet: entry.querySnippet.slice(0, 80),
+		hits: entry.hits,
+		durationMs: entry.durationMs,
+		error: entry.error,
+	});
+	if (s.recentQueries.length > 50) s.recentQueries = s.recentQueries.slice(0, 50);
+
+	writeTelemetryAtomic(state);
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +1053,7 @@ export function sanitizeSearchPrompt(prompt: string): string {
 }
 
 const QUERY_STOPWORDS = new Set([
+	// Grammatical / functional stopwords
 	"a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
 	"have", "has", "had", "i", "you", "he", "she", "it", "we", "they", "what", "which", "who",
 	"whom", "this", "that", "these", "those", "of", "in", "on", "at", "to", "for", "with", "from",
@@ -561,6 +1062,12 @@ const QUERY_STOPWORDS = new Set([
 	"under", "after", "before", "between", "during", "through", "against", "without", "within",
 	"along", "across", "answer", "name", "only", "one", "short", "sentence", "reply", "use",
 	"used", "using", "tell", "give", "show", "find",
+	// Conversational / meta inquiry verbs & discourse markers (prevents false-positive BM25 conjunctive leaks)
+	"want", "wants", "wanted", "know", "knows", "knew", "known", "how", "why", "when", "where",
+	"question", "questions", "ask", "asked", "asking", "think", "thinks", "thought",
+	"please", "like", "just", "also", "let", "lets", "see", "look", "get", "got", "getting",
+	"make", "made", "making", "take", "took", "need", "needs", "needed", "say", "said",
+	"someday", "maybe", "perhaps", "example", "sample", "naive",
 ]);
 
 /**
@@ -869,31 +1376,72 @@ function parseQmdJson(stdout: string): unknown {
 	return JSON.parse(jsonText);
 }
 
+export function isQmdModelDownloading(): boolean {
+	try {
+		const home = process.env.HOME || "~";
+		const modelsDir = path.join(home, ".cache", "qmd", "models");
+		if (fs.existsSync(modelsDir)) {
+			const files = fs.readdirSync(modelsDir);
+			return files.some((f) => f.endsWith(".ipull"));
+		}
+	} catch {
+		/* ignore */
+	}
+	return false;
+}
+
 export function runQmdSearch(
 	mode: "keyword" | "semantic" | "deep",
 	query: string,
 	limit: number,
 	timeoutOverrideMs?: number,
 ): Promise<{ results: QmdSearchResult[]; stderr: string }> {
+	if (mode !== "keyword" && isQmdModelDownloading()) {
+		return Promise.reject(
+			new Error(
+				"QMD model download in progress (~/.cache/qmd/models/*.ipull). Semantic/deep search will be available once download completes.",
+			),
+		);
+	}
+
 	const subcommand = mode === "keyword" ? "search" : mode === "semantic" ? "vsearch" : "query";
 	const args = [subcommand, "--json", "-c", COLLECTION_NAME, "-n", String(limit), query];
 	const timeoutMs = timeoutOverrideMs ?? getQmdSearchTimeoutMs();
 
 	return new Promise((resolve, reject) => {
-		execFileFn(
+		let child: ReturnType<typeof execFileFn> | undefined;
+		let timedOut = false;
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			if (child?.pid) {
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					try {
+						child.kill("SIGKILL");
+					} catch {
+						/* ignore */
+					}
+				}
+			}
+		}, timeoutMs);
+
+		child = execFileFn(
 			"qmd",
 			args,
-			{ timeout: timeoutMs, encoding: "utf8" } as ExecFileOptions,
+			{ timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf8" } as ExecFileOptions,
 			(err, stdout, stderr) => {
+				clearTimeout(timer);
 				const out = typeof stdout === "string" ? stdout : String(stdout ?? "");
 				const errOut = typeof stderr === "string" ? stderr : String(stderr ?? "");
-				if (err) {
-					const cleaned = stripAnsi(errOut).trim() || stripAnsi(err.message).trim();
-					const timedOut = (err as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
-					const hint = timedOut
-						? ` (qmd timed out after ${timeoutMs / 1000}s — retry shortly)`
+				if (err || timedOut) {
+					const cleaned = stripAnsi(errOut).trim() || stripAnsi(err?.message ?? "").trim();
+					const wasKilled = timedOut || (err as NodeJS.ErrnoException & { killed?: boolean })?.killed === true;
+					const hint = wasKilled
+						? ` (qmd timed out after ${timeoutMs / 1000}s — process killed, retry shortly)`
 						: "";
-					reject(new Error(`${cleaned}${hint}`));
+					reject(new Error(`${cleaned || "qmd search failed"}${hint}`));
 					return;
 				}
 				try {
@@ -918,7 +1466,10 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 	const sanitized = sanitizeSearchPrompt(prompt);
 	if (!sanitized) return "";
 
+	const startTime = Date.now();
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let winnerCandidate: string | null = null;
+	let didTimeout = false;
 	try {
 		const hasCollection = await checkCollection(COLLECTION_NAME);
 		if (!hasCollection) return "";
@@ -929,20 +1480,24 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 		const searchAll = async (): Promise<QmdSearchResult[]> => {
 			for (const candidate of attempts) {
 				const { results } = await runQmdSearch("keyword", candidate, 3, 1_000);
-				if (results.length > 0) return results;
+				if (results.length > 0) {
+					winnerCandidate = candidate;
+					return results;
+				}
 			}
 			return [];
 		};
 		const results = await Promise.race([
 			searchAll(),
 			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new Error("timeout")), 3_000);
+				timer = setTimeout(() => {
+					didTimeout = true;
+					reject(new Error("timeout"));
+				}, 3_000);
 			}),
 		]);
 
-		if (!results || results.length === 0) return "";
-
-		const snippets = results
+		const snippets = (results || [])
 			.map((r) => {
 				const text = getQmdResultText(r);
 				if (!text.trim()) return null;
@@ -955,6 +1510,18 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 			})
 			.filter(Boolean);
 
+		const elapsed = Date.now() - startTime;
+		recordRetrievalTelemetry({
+			promptSnippet: sanitized,
+			winnerCandidate,
+			hits: snippets.length,
+			durationMs: elapsed,
+			timedOut: didTimeout,
+		});
+		logDebug(
+			`turn retrieval: ${snippets.length} hit(s) via "${winnerCandidate ?? "none"}" in ${elapsed}ms`,
+		);
+
 		if (snippets.length === 0) return "";
 		return [
 			"## Relevant memories (auto-retrieved)",
@@ -962,7 +1529,16 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 			"",
 			snippets.join("\n\n---\n\n"),
 		].join("\n");
-	} catch {
+	} catch (err) {
+		const elapsed = Date.now() - startTime;
+		recordRetrievalTelemetry({
+			promptSnippet: sanitized,
+			winnerCandidate: null,
+			hits: 0,
+			durationMs: elapsed,
+			timedOut: didTimeout,
+		});
+		logDebug(`turn retrieval error/timeout after ${elapsed}ms:`, err);
 		return "";
 	} finally {
 		clearTimeout(timer);
@@ -1014,12 +1590,33 @@ export function getMemoryInventory() {
 	} catch {
 		dailyFiles = [];
 	}
+	let knowledgeFiles: string[] = [];
+	try {
+		knowledgeFiles = fs
+			.readdirSync(KNOWLEDGE_DIR)
+			.filter((f) => f.endsWith(".md"))
+			.sort();
+	} catch {
+		knowledgeFiles = [];
+	}
+	let archivedDailyFiles: string[] = [];
+	try {
+		archivedDailyFiles = fs
+			.readdirSync(ARCHIVE_DAILY_DIR)
+			.filter((f) => f.endsWith(".md"))
+			.sort();
+	} catch {
+		archivedDailyFiles = [];
+	}
 	return {
 		projectRoot: PROJECT_ROOT,
 		dir: MEMORY_DIR,
 		collectionName: COLLECTION_NAME,
 		longTermChars: longTerm.trim().length,
 		dailyCount: dailyFiles.length,
+		knowledgeCount: knowledgeFiles.length,
+		knowledgeFiles,
+		archivedDailyCount: archivedDailyFiles.length,
 		latestDaily: dailyFiles.length ? dailyFiles[dailyFiles.length - 1].replace(/\.md$/, "") : null,
 	};
 }
@@ -1046,6 +1643,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		refreshMemorySnapshot("session_start");
+		maybeTriggerAutonomousCompaction("session_start");
+	});
+
+	pi.on("session_before_compact", async () => {
+		await runAutonomousCompaction("session_before_compact");
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -1091,7 +1693,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Memory Write",
 		description: [
 			"Write to this project's memory files under .pi/memory/.",
-			"- 'long_term': MEMORY.md (append or overwrite) — decisions, preferences, durable facts",
+			"- 'long_term': MEMORY.md (append or overwrite) — active working invariants, preferences, laws",
+			"- 'knowledge': knowledge/<topic>.md (append or overwrite) — modular domain knowledge dossiers",
 			"- 'daily': today's daily log (always append) — running notes",
 			"Prefer tagged entries for recall, e.g.:",
 			"  #decision [[database-choice]] Chose PostgreSQL for backend services.",
@@ -1100,13 +1703,19 @@ export default function (pi: ExtensionAPI) {
 			"Suggested tags (not enforced): #decision #preference #lesson #bug #fact plus [[wiki-links]].",
 		].join("\n"),
 		parameters: Type.Object({
-			target: StringEnum(["long_term", "daily"] as const, {
+			target: StringEnum(["long_term", "daily", "knowledge"] as const, {
 				description: "Where to write",
 			}),
 			content: Type.String({ description: "Markdown content (use #tags and [[links]] when useful)" }),
+			topic: Type.Optional(
+				Type.String({
+					description:
+						"Topic name for knowledge target (e.g. 'architecture', 'billing'). Stored as knowledge/<topic>.md",
+				}),
+			),
 			mode: Type.Optional(
 				StringEnum(["append", "overwrite"] as const, {
-					description: "long_term only. Default: append",
+					description: "long_term or knowledge only. Default: append",
 				}),
 			),
 		}),
@@ -1114,7 +1723,7 @@ export default function (pi: ExtensionAPI) {
 			ensureDirs();
 			const sid = shortSessionId(ctx.sessionManager.getSessionId());
 			const ts = nowTimestamp();
-			const { target, content, mode } = params;
+			const { target, content, mode, topic } = params;
 
 			if (target === "daily") {
 				const filePath = dailyPath(todayStr());
@@ -1135,6 +1744,36 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (target === "knowledge") {
+				const cleanTopic = sanitizeTopicName(topic || "general");
+				const filePath = knowledgePath(cleanTopic);
+				const existing = readFileSafe(filePath) ?? "";
+				if (mode === "overwrite") {
+					writeFileAtomic(filePath, `<!-- last updated: ${ts} [${sid}] -->\n${content}`);
+				} else {
+					const stamped = `<!-- ${ts} [${sid}] -->\n${content}`;
+					const separator = existing.trim() ? "\n\n" : "";
+					writeFileAtomic(filePath, existing + separator + stamped);
+				}
+				await ensureQmdAvailableForUpdate();
+				scheduleQmdUpdate();
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `${mode === "overwrite" ? "Overwrote" : "Appended to"} knowledge dossier [${cleanTopic}] (${filePath})`,
+						},
+					],
+					details: {
+						path: filePath,
+						target,
+						topic: cleanTopic,
+						mode: mode ?? "append",
+						projectRoot: PROJECT_ROOT,
+					},
+				};
+			}
+
 			const existing = readFileSafe(MEMORY_FILE) ?? "";
 			if (mode === "overwrite") {
 				writeFileAtomic(MEMORY_FILE, `<!-- last updated: ${ts} [${sid}] -->\n${content}`);
@@ -1146,6 +1785,7 @@ export default function (pi: ExtensionAPI) {
 			await ensureQmdAvailableForUpdate();
 			scheduleQmdUpdate();
 			refreshMemorySnapshot("long_term_write");
+			maybeTriggerAutonomousCompaction("long_term_write");
 			return {
 				content: [
 					{
@@ -1161,10 +1801,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memory_read",
 		label: "Memory Read",
-		description: "Read MEMORY.md, a daily log, or list daily dates.",
+		description: "Read MEMORY.md, a knowledge dossier, a daily log, or list available dates/topics.",
 		parameters: Type.Object({
-			target: StringEnum(["long_term", "daily", "list_daily"] as const),
+			target: StringEnum(["long_term", "daily", "list_daily", "knowledge", "list_knowledge"] as const),
 			date: Type.Optional(Type.String({ description: "YYYY-MM-DD for daily (default: today)" })),
+			topic: Type.Optional(Type.String({ description: "Topic name for knowledge (e.g. 'architecture', 'billing')" })),
 		}),
 		async execute(_id, params): Promise<ToolOut> {
 			ensureDirs();
@@ -1190,9 +1831,35 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (params.target === "list_knowledge") {
+				let files: string[] = [];
+				try {
+					files = fs
+						.readdirSync(KNOWLEDGE_DIR)
+						.filter((f) => f.endsWith(".md"))
+						.sort();
+				} catch {
+					files = [];
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: files.length
+								? files.map((f) => f.replace(/\.md$/, "")).join("\n")
+								: "No knowledge dossiers.",
+						},
+					],
+					details: { count: files.length, dir: KNOWLEDGE_DIR },
+				};
+			}
+
 			let filePath: string;
 			if (params.target === "long_term") {
 				filePath = MEMORY_FILE;
+			} else if (params.target === "knowledge") {
+				const cleanTopic = sanitizeTopicName(params.topic || "general");
+				filePath = knowledgePath(cleanTopic);
 			} else {
 				const d = params.date ?? todayStr();
 				if (!isValidDailyDate(d)) {
@@ -1309,6 +1976,37 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (record.target === "compaction") {
+				if (record.originalMemory) {
+					writeFileAtomic(MEMORY_FILE, record.originalMemory);
+				}
+				if (record.archivedDailies && Array.isArray(record.archivedDailies)) {
+					for (const f of record.archivedDailies) {
+						const src = path.join(ARCHIVE_DAILY_DIR, f);
+						const dst = path.join(DAILY_DIR, f);
+						try {
+							if (fs.existsSync(src)) fs.renameSync(src, dst);
+						} catch {
+							/* ignore */
+						}
+					}
+				}
+				record.restoredAt = new Date().toISOString();
+				fs.writeFileSync(recoveryFile, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
+				refreshMemorySnapshot("compaction_restore");
+				await ensureQmdAvailableForUpdate();
+				scheduleQmdUpdate();
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Restored compaction snapshot to ${MEMORY_FILE} and restored ${record.archivedDailies?.length ?? 0} daily log(s).`,
+						},
+					],
+					details: { recoveryId: record.id, path: MEMORY_FILE },
+				};
+			}
+
 			const dest = record.target === "daily" && record.date ? dailyPath(record.date) : MEMORY_FILE;
 			const existing = readFileSafe(dest) ?? "";
 			const block = record.removedContent.join("\n\n");
@@ -1372,6 +2070,7 @@ export default function (pi: ExtensionAPI) {
 
 			const mode = params.mode ?? "keyword";
 			const limit = clampSearchLimit(params.limit);
+			const searchStartTime = Date.now();
 			try {
 				let { results, stderr } = await runQmdSearch(mode, params.query, limit);
 				let relaxedQuery: string | undefined;
@@ -1390,6 +2089,17 @@ export default function (pi: ExtensionAPI) {
 				}
 				const needsEmbed = /need embeddings/i.test(stderr ?? "");
 				const embedStarted = needsEmbed ? ensureQmdEmbed() : false;
+				const searchDurationMs = Date.now() - searchStartTime;
+
+				recordSearchTelemetry({
+					mode,
+					querySnippet: params.query,
+					hits: results.length,
+					durationMs: searchDurationMs,
+				});
+				logDebug(
+					`search (${mode}): ${results.length} hit(s) for "${params.query}" in ${searchDurationMs}ms`,
+				);
 
 				if (results.length === 0) {
 					const embedHint =
@@ -1427,6 +2137,15 @@ export default function (pi: ExtensionAPI) {
 					details: { mode, collection: COLLECTION_NAME, count: results.length, needsEmbed, relaxedQuery },
 				};
 			} catch (err) {
+				const searchDurationMs = Date.now() - searchStartTime;
+				recordSearchTelemetry({
+					mode,
+					querySnippet: params.query,
+					hits: 0,
+					durationMs: searchDurationMs,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				logDebug(`search error (${mode}) for "${params.query}" after ${searchDurationMs}ms:`, err);
 				return {
 					content: [
 						{
@@ -1444,11 +2163,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memory_status",
 		label: "Memory Status",
-		description: "Show project binding, store inventory, and qmd/collection health.",
-		parameters: Type.Object({}),
-		async execute(): Promise<ToolOut> {
+		description: "Show project binding, store inventory, qmd health, and telemetry metrics.",
+		parameters: Type.Object({
+			details: Type.Optional(
+				Type.Boolean({
+					description: "Include detailed recent queries and compaction history (default: false)",
+				}),
+			),
+		}),
+		async execute(_id, params): Promise<ToolOut> {
 			ensureDirs();
 			const inv = getMemoryInventory();
+			const telemetry = readTelemetry();
 			const qmdOk = qmdAvailable || (await detectQmd());
 			let collectionOk = false;
 			let embeddings: "ready" | "missing" | "unknown" | "n/a" = "n/a";
@@ -1457,6 +2183,10 @@ export default function (pi: ExtensionAPI) {
 				embeddings = collectionOk ? await probeEmbeddings() : "n/a";
 			}
 			const mark = (ok: boolean) => (ok ? "✓" : "✗");
+			const rStats = telemetry.retrievalStats;
+			const hitRate = rStats.totalTurns > 0 ? Math.round((rStats.hits / rStats.totalTurns) * 100) : 0;
+			const lastCompaction = telemetry.compactionHistory[0];
+
 			const lines = [
 				"# Memory status (project-scoped PoC)",
 				"",
@@ -1464,7 +2194,9 @@ export default function (pi: ExtensionAPI) {
 				`- Memory dir: ${inv.dir}`,
 				`- Collection: \`${inv.collectionName}\``,
 				`- MEMORY.md: ${inv.longTermChars} chars`,
+				`- Knowledge dossiers: ${inv.knowledgeCount} files`,
 				`- Daily logs: ${inv.dailyCount}${inv.latestDaily ? ` (latest ${inv.latestDaily})` : ""}`,
+				`- Archived daily logs: ${inv.archivedDailyCount} files`,
 				"",
 				"## Search (qmd)",
 				`- qmd available: ${mark(qmdOk)}`,
@@ -1475,18 +2207,62 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				lines.push("", qmdInstallInstructions());
 			}
+
+			lines.push(
+				"",
+				"## Metrics & Diagnostics",
+				`- Auto-Retrievals: ${rStats.totalTurns} turns (${rStats.hits} hits, ${rStats.misses} misses, ${hitRate}% hit rate, ${rStats.timeouts} timeouts)`,
+				`- Avg Retrieval Latency: ${rStats.avgDurationMs}ms`,
+				`- Explicit Searches: ${telemetry.searchStats.totalSearches} (avg ${telemetry.searchStats.avgDurationMs}ms)`,
+				`- Compactions: ${telemetry.compactionHistory.length} total runs`,
+			);
+
+			if (lastCompaction) {
+				lines.push(
+					`- Last Compaction: ${lastCompaction.timestamp} (${lastCompaction.beforeChars} → ${lastCompaction.afterChars} chars, ${lastCompaction.supersededCount} superseded, in ${lastCompaction.durationMs}ms)`,
+				);
+			}
+
+			if (params?.details) {
+				if (telemetry.compactionHistory.length > 0) {
+					lines.push("", "### Recent Compactions");
+					for (const c of telemetry.compactionHistory.slice(0, 5)) {
+						lines.push(
+							`  - [${c.timestamp}] ${c.reason}: ${c.beforeChars} → ${c.afterChars} chars (${c.supersededCount} superseded, ${c.knowledgeCreatedCount} knowledge) in ${c.durationMs}ms`,
+						);
+					}
+				}
+				if (rStats.recentSearches.length > 0) {
+					lines.push("", "### Recent Turn Retrievals");
+					for (const s of rStats.recentSearches.slice(0, 5)) {
+						lines.push(
+							`  - [${s.timestamp}] ${s.durationMs}ms | hits: ${s.hits} | candidate: "${s.winnerCandidate || "none"}" | prompt: "${s.promptSnippet}"`,
+						);
+					}
+				}
+				if (telemetry.searchStats.recentQueries.length > 0) {
+					lines.push("", "### Recent Explicit Searches");
+					for (const q of telemetry.searchStats.recentQueries.slice(0, 5)) {
+						lines.push(
+							`  - [${q.timestamp}] ${q.mode} | ${q.durationMs}ms | hits: ${q.hits} | query: "${q.querySnippet}"${q.error ? ` | error: ${q.error}` : ""}`,
+						);
+					}
+				}
+			}
+
 			lines.push(
 				"",
 				"## Config",
 				`- PI_MEMORY_SNAPSHOT: ${getSnapshotMode()}`,
 				`- PI_MEMORY_RETRIEVE: ${isRetrieveEnabled() ? "on" : "off"}`,
 				`- PI_MEMORY_QMD_UPDATE: ${getQmdUpdateMode()}`,
+				`- PI_MEMORY_DEBUG: ${isDebugEnabled() ? "on" : "off"}`,
 				`- PI_MEMORY_DIR: ${process.env.PI_MEMORY_DIR ? "set" : "default (.pi/memory under project)"}`,
 				`- PI_MEMORY_PROJECT_ROOT: ${process.env.PI_MEMORY_PROJECT_ROOT ? "set" : "auto (git root / cwd)"}`,
 			);
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
-				details: { ...inv, qmd: qmdOk, collection: collectionOk, embeddings },
+				details: { ...inv, qmd: qmdOk, collection: collectionOk, embeddings, telemetry },
 			};
 		},
 	});

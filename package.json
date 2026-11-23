@@ -1,6 +1,6 @@
 {
 	"name": "pi-memory",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Project-scoped pi memory extension (.pi/memory + per-project qmd collection)",
 	"main": "index.ts",
 	"type": "module",
@@ -27,7 +27,8 @@
 		"build": "tsc -p tsconfig.json --noEmit",
 		"test": "node --experimental-strip-types --test test/unit.test.ts",
 		"test:e2e": "node --experimental-strip-types test/e2e.ts",
-		"test:eval": "node --experimental-strip-types test/eval-recall.ts"
+		"test:eval": "node --experimental-strip-types test/eval-recall.ts",
+		"test:playground": "node --experimental-strip-types test/playground-e2e.test.ts"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": ">=0.81.1",

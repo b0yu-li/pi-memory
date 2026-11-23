@@ -10,6 +10,7 @@ import {
 	_setExecFileForTest,
 	_resetExecFileForTest,
 	_setPaths,
+	archiveAgingDailyLogs,
 	bindProject,
 	buildMemoryContext,
 	buildPreview,
@@ -18,12 +19,24 @@ import {
 	deriveQueryCandidates,
 	detectQmd,
 	ensureDirs,
+	extractDeduplicationKey,
 	forgetBlocks,
+	getMemoryInventory,
 	isRetrieveEnabled,
+	knowledgePath,
+	parseMemoryEntries,
 	previewMemoryContent,
+	readTelemetry,
+	recordCompactionTelemetry,
+	recordRetrievalTelemetry,
+	recordSearchTelemetry,
 	resolveMemoryDir,
 	resolveProjectRoot,
+	runAutonomousCompaction,
 	sanitizeSearchPrompt,
+	sanitizeTopicName,
+	shouldCompactMemory,
+	telemetryPath,
 	writeFileAtomic,
 } from "../index.ts";
 
@@ -282,7 +295,7 @@ describe("store durability (proven probes)", () => {
 		const big = Array.from({ length: 5000 }, (_, i) => `entry line ${i} with some text`).join("\n");
 		const r = previewMemoryContent(big);
 		assert.equal(r.truncated, true);
-		assert.ok(r.text.length <= 4000 + 200, `capped text was ${r.text.length}`);
+		assert.ok(r.text.length <= 24_000 + 200, `capped text was ${r.text.length}`);
 		assert.ok(r.text.includes("[truncated:"));
 		assert.ok(!hasLoneSurrogateIn(r.text));
 	});
@@ -360,5 +373,189 @@ describe("deriveQueryCandidates (conjunctive BM25 fix)", () => {
 		const set = new Set(c.map((x) => x.toLowerCase()));
 		assert.equal(c.length, set.size);
 		assert.ok(c.length <= 8);
+	});
+
+	it("filters conversational inquiry terms and prevents conversational pair leaks", () => {
+		const c = deriveQueryCandidates("I want to know how the memory extension performs with naive question");
+		// Ensure conversational verbs and inquiry markers are not in content words
+		const contentWords = c[1] ? c[1].split(" ") : [];
+		assert.ok(!contentWords.includes("want"), "should strip 'want'");
+		assert.ok(!contentWords.includes("know"), "should strip 'know'");
+		assert.ok(!contentWords.includes("question"), "should strip 'question'");
+		assert.ok(!contentWords.includes("naive"), "should strip 'naive'");
+		assert.ok(!c.some((x) => x === "want know"), "must not produce 'want know' pair");
+	});
+});
+
+describe("knowledge and archive topology", () => {
+	it("sanitizes topic names cleanly", () => {
+		assert.equal(sanitizeTopicName("Architecture & Design!"), "architecture-design");
+		assert.equal(sanitizeTopicName("Billing_Ledger"), "billing_ledger");
+		assert.equal(sanitizeTopicName(""), "general");
+	});
+
+	it("creates knowledge and archive directories in ensureDirs", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-top-"));
+		_setPaths(root);
+		ensureDirs();
+		const binding = _getBinding();
+		assert.ok(fs.existsSync(binding.knowledgeDir));
+		assert.ok(fs.existsSync(binding.archiveDir));
+		assert.ok(fs.existsSync(binding.archiveDailyDir));
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	it("reports knowledge and archived files in getMemoryInventory", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-inv-"));
+		_setPaths(root);
+		ensureDirs();
+		const binding = _getBinding();
+		fs.writeFileSync(path.join(binding.knowledgeDir, "billing.md"), "# Billing Dossier\n");
+		fs.writeFileSync(path.join(binding.archiveDailyDir, "2026-01-01.md"), "# Old Log\n");
+
+		const inv = getMemoryInventory();
+		assert.equal(inv.knowledgeCount, 1);
+		assert.deepEqual(inv.knowledgeFiles, ["billing.md"]);
+		assert.equal(inv.archivedDailyCount, 1);
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+});
+
+describe("autonomous compaction engine", () => {
+	it("extracts deduplication keys from markdown blocks", () => {
+		assert.equal(extractDeduplicationKey("#decision [[database-choice]] PostgreSQL"), "database-choice");
+		assert.equal(extractDeduplicationKey("#preference [[package-manager]] pnpm"), "package-manager");
+		assert.equal(extractDeduplicationKey("## Contact Details: Xiaoyu"), "contact details: xiaoyu");
+		assert.equal(extractDeduplicationKey("Regular plain text without tags or headers"), null);
+	});
+
+	it("evaluates shouldCompactMemory thresholds correctly", () => {
+		assert.equal(shouldCompactMemory(""), false);
+		assert.equal(shouldCompactMemory("Short note\n"), false);
+		const lines600 = Array.from({ length: 600 }, (_, i) => `Line ${i}`).join("\n");
+		assert.equal(shouldCompactMemory(lines600), true);
+		const chars25000 = "a".repeat(25_000);
+		assert.equal(shouldCompactMemory(chars25000), true);
+	});
+
+	it("archives aging daily logs older than threshold", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-age-"));
+		_setPaths(root);
+		ensureDirs();
+		const binding = _getBinding();
+
+		// Write a recent log (today) and an old log (20 days ago)
+		const today = new Date().toISOString().slice(0, 10);
+		const oldDate = new Date();
+		oldDate.setDate(oldDate.getDate() - 20);
+		const oldDateStr = oldDate.toISOString().slice(0, 10);
+
+		fs.writeFileSync(path.join(binding.dailyDir, `${today}.md`), "# Today's log\n");
+		fs.writeFileSync(path.join(binding.dailyDir, `${oldDateStr}.md`), "# Old log\n");
+
+		const moved = archiveAgingDailyLogs(14);
+		assert.ok(moved.includes(`${oldDateStr}.md`));
+		assert.ok(!moved.includes(`${today}.md`));
+
+		assert.ok(fs.existsSync(path.join(binding.archiveDailyDir, `${oldDateStr}.md`)));
+		assert.ok(fs.existsSync(path.join(binding.dailyDir, `${today}.md`)));
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	it("deduplicates superseded invariants and creates recovery record", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-compact-"));
+		_setPaths(root);
+		ensureDirs();
+		const binding = _getBinding();
+
+		// Create a large MEMORY.md (> 500 lines) with duplicate keys
+		const entry1 = "<!-- 2026-10-01 10:00:00 [00000001] -->\n#decision [[database-choice]] Chose MySQL for alpha.\n";
+		const filler = Array.from({ length: 550 }, (_, i) => `<!-- 2026-10-02 10:00:00 [00000002] -->\n#fact [[fact-${i}]] Detail ${i}\n`).join("\n");
+		const entry2 = "<!-- 2026-11-20 10:00:00 [00000003] -->\n#decision [[database-choice]] Migrated to PostgreSQL for prod.\n";
+
+		fs.writeFileSync(binding.memoryFile, `${entry1}\n\n${filler}\n\n${entry2}`);
+
+		const result = await runAutonomousCompaction("test");
+		assert.equal(result.triggered, true);
+		assert.ok(result.supersededCount >= 1);
+		assert.ok(result.recoveryId);
+
+		const updatedMemory = fs.readFileSync(binding.memoryFile, "utf-8");
+		// Entry 2 (latest) must be retained
+		assert.ok(updatedMemory.includes("Migrated to PostgreSQL"));
+		// Entry 1 (superseded) must be purged from MEMORY.md
+		assert.ok(!updatedMemory.includes("Chose MySQL for alpha"));
+
+		// Archived superseded file must contain the old entry
+		const archived = fs.readFileSync(binding.archiveSupersededFile, "utf-8");
+		assert.ok(archived.includes("Chose MySQL for alpha"));
+
+		// Recovery snapshot must exist
+		const recPath = path.join(binding.recoveryDir, `${result.recoveryId}.json`);
+		assert.ok(fs.existsSync(recPath));
+
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+});
+
+describe("telemetry and metrics ledger", () => {
+	it("records and updates retrieval telemetry correctly", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-tel-"));
+		_setPaths(root);
+		ensureDirs();
+
+		recordRetrievalTelemetry({
+			promptSnippet: "what database do we use",
+			winnerCandidate: "database",
+			hits: 2,
+			durationMs: 85,
+		});
+
+		recordRetrievalTelemetry({
+			promptSnippet: "unknown query",
+			winnerCandidate: null,
+			hits: 0,
+			durationMs: 110,
+		});
+
+		const state = readTelemetry();
+		assert.equal(state.retrievalStats.totalTurns, 2);
+		assert.equal(state.retrievalStats.hits, 1);
+		assert.equal(state.retrievalStats.misses, 1);
+		assert.equal(state.retrievalStats.avgDurationMs, Math.round((85 + 110) / 2));
+		assert.equal(state.retrievalStats.recentSearches.length, 2);
+
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	it("records compaction and search telemetry cleanly", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-tel2-"));
+		_setPaths(root);
+		ensureDirs();
+
+		recordCompactionTelemetry({
+			reason: "lifecycle",
+			durationMs: 15,
+			beforeChars: 50_000,
+			afterChars: 18_000,
+			supersededCount: 5,
+			archivedDailiesCount: 3,
+			knowledgeCreatedCount: 2,
+		});
+
+		recordSearchTelemetry({
+			mode: "keyword",
+			querySnippet: "database-choice",
+			hits: 1,
+			durationMs: 45,
+		});
+
+		const state = readTelemetry();
+		assert.equal(state.compactionHistory.length, 1);
+		assert.equal(state.compactionHistory[0].supersededCount, 5);
+		assert.equal(state.searchStats.totalSearches, 1);
+		assert.equal(state.searchStats.byMode.keyword, 1);
+
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 });

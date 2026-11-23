@@ -8,3 +8,8 @@ node_modules/
 .envrc.local
 ref
 .pi/context-mode
+backlog/
+.backlog/
+.playground-sandbox/
+
+

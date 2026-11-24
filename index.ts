@@ -10,7 +10,8 @@ import { type ExecFileOptions, execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
@@ -1053,22 +1054,88 @@ export function sanitizeSearchPrompt(prompt: string): string {
 }
 
 const QUERY_STOPWORDS = new Set([
-	// Grammatical / functional stopwords
+	// Grammatical / functional pronouns & determiners
 	"a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
-	"have", "has", "had", "i", "you", "he", "she", "it", "we", "they", "what", "which", "who",
-	"whom", "this", "that", "these", "those", "of", "in", "on", "at", "to", "for", "with", "from",
-	"by", "as", "and", "or", "but", "if", "then", "than", "so", "not", "no", "yes", "can",
-	"could", "will", "would", "shall", "should", "may", "might", "must", "about", "into", "over",
-	"under", "after", "before", "between", "during", "through", "against", "without", "within",
-	"along", "across", "answer", "name", "only", "one", "short", "sentence", "reply", "use",
-	"used", "using", "tell", "give", "show", "find",
-	// Conversational / meta inquiry verbs & discourse markers (prevents false-positive BM25 conjunctive leaks)
+	"have", "has", "had", "having", "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+	"us", "them", "my", "mine", "your", "yours", "his", "her", "hers", "its", "our", "ours",
+	"their", "theirs", "what", "which", "who", "whom", "whose", "this", "that", "these", "those",
+	"some", "any", "all", "both", "each", "every", "other", "another", "such",
+	// Prepositions & conjunctions
+	"of", "in", "on", "at", "to", "for", "with", "from", "by", "as", "and", "or", "but", "if",
+	"then", "than", "so", "not", "no", "yes", "can", "could", "will", "would", "shall", "should",
+	"may", "might", "must", "about", "into", "over", "under", "after", "before", "between",
+	"during", "through", "against", "without", "within", "along", "across",
+	// Output formatting & instruction filler
+	"answer", "name", "only", "one", "short", "sentence", "reply", "use", "used", "using",
+	"tell", "give", "show", "find",
+	// Conversational / meta inquiry verbs & discourse markers
 	"want", "wants", "wanted", "know", "knows", "knew", "known", "how", "why", "when", "where",
 	"question", "questions", "ask", "asked", "asking", "think", "thinks", "thought",
 	"please", "like", "just", "also", "let", "lets", "see", "look", "get", "got", "getting",
-	"make", "made", "making", "take", "took", "need", "needs", "needed", "say", "said",
+	"make", "made", "making", "take", "took", "need", "needs", "needed", "say", "said", "saying",
 	"someday", "maybe", "perhaps", "example", "sample", "naive",
+	// Temporal / frequency adverbs
+	"actually", "really", "already", "still", "ever", "never", "always", "today", "yesterday",
+	"tomorrow", "now", "again", "first", "second", "third", "last", "next", "previous",
+	"thing", "things", "way", "ways", "lot", "lots",
+	// Continuation, flow & acknowledgment markers
+	"continue", "continues", "continued", "continuing",
+	"proceed", "proceeds", "proceeded", "proceeding",
+	"resume", "resumes", "resumed", "resuming",
+	"start", "started", "starting", "stop", "stopped", "stopping",
+	"finish", "finished", "finishing", "done",
+	"keep", "going", "step", "steps", "turn", "turns",
+	"ok", "okay", "cool", "nice", "good", "great", "fine", "alright",
+	"sounds", "looks", "awesome", "perfect", "thanks", "thank", "sure", "yep", "yeah", "lgtm",
+	// Meta-evaluation & execution performance terms (prevents false-positive conjunctive leaks on turn reviews)
+	"performing", "performed", "perform", "performs", "performance",
+	"execution", "experience", "intended", "intented", "intend", "intends",
+	"status", "progress", "update", "updates", "result", "results",
+	"working", "works", "worked", "doing",
+	"well", "better", "best", "worse", "worst",
+	"remember", "remind", "check",
 ]);
+
+/**
+ * Detect conversational meta-turns, acknowledgments, continuations,
+ * or pure procedural directives that lack domain-specific query intent.
+ * Gating these early saves ~600ms QMD search latency and eliminates
+ * false-positive memory injections (e.g. searching for "continue" or "our execution").
+ */
+export function isMetaTurn(prompt: string): boolean {
+	const trimmed = prompt.trim();
+	if (!trimmed) return true;
+
+	// Normalize: lower-case, collapse whitespace, strip peripheral punctuation
+	const normalized = trimmed
+		.toLowerCase()
+		.replace(/^[^a-z0-9#+_-]+|[^a-z0-9#+_-]+$/gi, "")
+		.trim();
+
+	// Exact / pure continuation and acknowledgment patterns
+	const PURE_META_PATTERNS = new Set([
+		"continue", "proceed", "go on", "go ahead", "keep going", "resume", "carry on", "next", "more",
+		"ok", "okay", "cool", "nice", "good", "great", "sounds good", "looks good", "lgtm",
+		"thanks", "thank you", "thx", "ty", "yes", "yep", "yeah", "sure", "fine", "alright", "all right",
+		"done", "perfect", "awesome", "got it", "understood", "ack",
+		"no", "nope", "cancel", "stop",
+		"run tests", "run test", "run the tests", "test", "tests",
+		"commit", "push", "git status", "revert", "clean up", "undo",
+	]);
+
+	if (PURE_META_PATTERNS.has(normalized)) return true;
+
+	// Regex for common short acknowledgment/continuation combinations (e.g. "ok continue", "cool, thanks", "sounds good, proceed")
+	if (
+		/^(ok|okay|cool|nice|good|great|thanks|thank you|sure|yep|yes|proceed|continue|sounds good|looks good|all right)[\s,!.-]+(continue|proceed|go on|go ahead|thanks|thank you|next|done|ok|cool)?$/i.test(
+			trimmed,
+		)
+	) {
+		return true;
+	}
+
+	return false;
+}
 
 /**
  * Derive keyword-query candidates for conjunctive BM25 (qmd `search`):
@@ -1076,15 +1143,23 @@ const QUERY_STOPWORDS = new Set([
  * prompts with function words reliably return zero hits (probed). Candidates
  * go from most-specific to most-generic: raw prompt → content words →
  * adjacent content-word pairs → long single tokens.
+ *
+ * If the prompt is a meta-turn or contains zero non-stopword content tokens,
+ * returns an empty array to short-circuit retrieval and prevent false-positive leaks.
  */
 export function deriveQueryCandidates(prompt: string): string[] {
+	if (isMetaTurn(prompt)) return [];
+
 	const tokens = prompt
 		.toLowerCase()
 		.replace(/[^a-z0-9\s#+-]/g, " ")
 		.split(/\s+/)
 		.filter((t) => t.length >= 3 && !QUERY_STOPWORDS.has(t));
+
+	if (tokens.length === 0) return [];
+
 	const candidates: string[] = [prompt.trim()];
-	if (tokens.length > 0) candidates.push(tokens.join(" "));
+	candidates.push(tokens.join(" "));
 	for (let i = 0; i < tokens.length - 1; i++) candidates.push(`${tokens[i]} ${tokens[i + 1]}`);
 	candidates.push(...tokens.filter((t) => t.length >= 6).slice(0, 4));
 	const seen = new Set<string>();
@@ -1467,16 +1542,26 @@ export async function searchRelevantMemories(prompt: string): Promise<string> {
 	if (!sanitized) return "";
 
 	const startTime = Date.now();
+
+	// Short-circuit meta-turns and stopword-only prompts before invoking QMD
+	const attempts = deriveQueryCandidates(sanitized).slice(0, 8);
+	if (attempts.length === 0) {
+		recordRetrievalTelemetry({
+			promptSnippet: sanitized,
+			winnerCandidate: null,
+			hits: 0,
+			durationMs: Date.now() - startTime,
+			timedOut: false,
+		});
+		return "";
+	}
+
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let winnerCandidate: string | null = null;
 	let didTimeout = false;
 	try {
 		const hasCollection = await checkCollection(COLLECTION_NAME);
 		if (!hasCollection) return "";
-
-		// Try derivation candidates in order (raw → content words → pairs →
-		// long tokens); conjunctive BM25 means raw NL prompts often miss.
-		const attempts = deriveQueryCandidates(sanitized).slice(0, 8);
 		const searchAll = async (): Promise<QmdSearchResult[]> => {
 			for (const candidate of attempts) {
 				const { results } = await runQmdSearch("keyword", candidate, 3, 1_000);
@@ -1908,7 +1993,7 @@ export default function (pi: ExtensionAPI) {
 					details: {},
 				};
 			}
-			const target: MemoryTarget = params.target ?? "long_term";
+			const target: MemoryTarget = (params.target ?? "long_term") as MemoryTarget;
 			let filePath: string;
 			let recoveryDate: string | undefined;
 			if (target === "daily") {
@@ -2068,7 +2153,10 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const mode = params.mode ?? "keyword";
+			const mode: "keyword" | "semantic" | "deep" = (params.mode ?? "keyword") as
+				| "keyword"
+				| "semantic"
+				| "deep";
 			const limit = clampSearchLimit(params.limit);
 			const searchStartTime = Date.now();
 			try {

@@ -22,6 +22,7 @@ import {
 	extractDeduplicationKey,
 	forgetBlocks,
 	getMemoryInventory,
+	isMetaTurn,
 	isRetrieveEnabled,
 	knowledgePath,
 	parseMemoryEntries,
@@ -384,6 +385,57 @@ describe("deriveQueryCandidates (conjunctive BM25 fix)", () => {
 		assert.ok(!contentWords.includes("question"), "should strip 'question'");
 		assert.ok(!contentWords.includes("naive"), "should strip 'naive'");
 		assert.ok(!c.some((x) => x === "want know"), "must not produce 'want know' pair");
+	});
+});
+
+describe("isMetaTurn and meta-turn retrieval gating", () => {
+	it("detects pure continuation and acknowledgment phrases", () => {
+		assert.equal(isMetaTurn("continue"), true);
+		assert.equal(isMetaTurn("Continue!"), true);
+		assert.equal(isMetaTurn("proceed"), true);
+		assert.equal(isMetaTurn("go ahead"), true);
+		assert.equal(isMetaTurn("keep going"), true);
+		assert.equal(isMetaTurn("ok"), true);
+		assert.equal(isMetaTurn("okay"), true);
+		assert.equal(isMetaTurn("cool"), true);
+		assert.equal(isMetaTurn("nice"), true);
+		assert.equal(isMetaTurn("sounds good"), true);
+		assert.equal(isMetaTurn("looks good"), true);
+		assert.equal(isMetaTurn("LGTM"), true);
+		assert.equal(isMetaTurn("thanks"), true);
+		assert.equal(isMetaTurn("thank you"), true);
+		assert.equal(isMetaTurn("ok continue"), true);
+		assert.equal(isMetaTurn("cool, thanks"), true);
+		assert.equal(isMetaTurn("sounds good, proceed"), true);
+		assert.equal(isMetaTurn("done"), true);
+		assert.equal(isMetaTurn("   "), true);
+	});
+
+	it("does not false-flag domain prompts containing continuation keywords", () => {
+		assert.equal(isMetaTurn("continue with shopify app migration"), false);
+		assert.equal(isMetaTurn("What database did we choose for backend services?"), false);
+		assert.equal(isMetaTurn("how does querit integration work?"), false);
+		assert.equal(isMetaTurn("investigate why vibe shopify redirect failed"), false);
+	});
+
+	it("returns empty candidates on pure meta-turns or stopword-only prompts", () => {
+		assert.deepEqual(deriveQueryCandidates("continue"), []);
+		assert.deepEqual(deriveQueryCandidates("ok cool"), []);
+		assert.deepEqual(deriveQueryCandidates("sounds good, thanks!"), []);
+		assert.deepEqual(deriveQueryCandidates("what do you think about that?"), []);
+		assert.deepEqual(deriveQueryCandidates("How is our execution experience doing? Is it performing as intended?"), []);
+	});
+
+	it("extracts clean domain candidates on mixed prompts without meta leaks", () => {
+		const prompt = "Are we using the 2.0 pi-memory extension, from our execution experience, how is it doing? Performing as intented?";
+		const candidates = deriveQueryCandidates(prompt);
+		assert.ok(candidates.length > 0, "should produce candidates for real domain inquiry");
+		// Invariants: must NOT contain conversational leaks 'our execution', 'execution experience', 'doing performing'
+		assert.ok(!candidates.some((c) => c === "our execution"), "must not emit 'our execution'");
+		assert.ok(!candidates.some((c) => c === "execution experience"), "must not emit 'execution experience'");
+		assert.ok(!candidates.some((c) => c === "doing performing"), "must not emit 'doing performing'");
+		// Must preserve domain topic
+		assert.ok(candidates.some((c) => c.includes("pi-memory") || c.includes("extension")), "must retain technical nouns");
 	});
 });
 
